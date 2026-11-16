@@ -104,6 +104,9 @@ tailwind.config = { theme: { extend: { colors: { wa: { DEFAULT: '#008069', light
             <div id="chatTitle" class="font-semibold truncate"></div>
             <div id="chatSub" class="text-xs text-white/80 truncate"></div>
           </div>
+          <button id="btnRefresh" type="button" title="Muat ulang pesan" aria-label="Muat ulang pesan" class="w-10 h-10 rounded-full hover:bg-white/10 flex items-center justify-center">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+          </button>
           <button id="btnSettingsU" title="Pengaturan website" aria-label="Pengaturan website" class="hidden w-10 h-10 rounded-full hover:bg-white/10 items-center justify-center">⚙️</button>
           <button id="btnLogoutU" title="Keluar" aria-label="Keluar" class="hidden w-10 h-10 rounded-full hover:bg-white/10 items-center justify-center">
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/></svg>
@@ -131,6 +134,11 @@ tailwind.config = { theme: { extend: { colors: { wa: { DEFAULT: '#008069', light
             <button id="pickMedia" class="w-full text-left px-4 py-2.5 text-sm hover:bg-gray-50">🖼️ Foto atau video</button>
             <button id="pickDoc" class="w-full text-left px-4 py-2.5 text-sm hover:bg-gray-50">📄 Dokumen</button>
           </div>
+          <div id="emojiPanel" class="hidden absolute bottom-full left-0 right-0 bg-white border-t border-gray-200 shadow-[0_-4px_12px_rgba(0,0,0,.08)] z-30">
+            <div id="emojiTabs" class="flex overflow-x-auto sb border-b border-gray-100 px-1"></div>
+            <div id="emojiGrid" class="h-56 overflow-y-auto sb p-2 grid grid-cols-8 sm:grid-cols-10 md:grid-cols-12 gap-1"></div>
+          </div>
+          <button id="btnEmoji" type="button" aria-label="Emotikon" aria-expanded="false" class="w-11 h-11 shrink-0 rounded-full hover:bg-gray-200 text-2xl flex items-center justify-center">😊</button>
           <button id="btnAttach" aria-label="Lampirkan file" class="w-11 h-11 shrink-0 rounded-full hover:bg-gray-200 text-2xl flex items-center justify-center">📎</button>
           <textarea id="msgInput" rows="1" placeholder="Ketik pesan" class="flex-1 min-w-0 resize-none rounded-[22px] bg-white px-4 py-2 text-[16px] leading-6 outline-none shadow-sm focus:ring-2 focus:ring-wa-light/40"></textarea>
           <button id="btnSend" aria-label="Kirim" class="w-11 h-11 shrink-0 rounded-full bg-wa-light hover:bg-wa text-white flex items-center justify-center">
