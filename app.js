@@ -20,12 +20,24 @@ const IMG_EXT = /\.(jpe?g|png|gif|webp|bmp|heic|avif)$/i, VID_EXT = /\.(mp4|webm
 const driveCache = new Map(), driveMime = new Map();
 function fetchDriveBlob(id) {
   if (!driveCache.has(id)) {
-    const p = api('getFile', { file_id: id }).then((r) => {
+    const p = (async () => {
+      // 1) cek cache permanen di perangkat -> pembukaan ulang instan
+      const key = location.origin + BASE_PATH + '_f/' + encodeURIComponent(id);
+      let c = null;
+      try {
+        c = await caches.open('lsc-files');
+        const hit = await c.match(key);
+        if (hit) { const b = await hit.blob(); driveMime.set(id, b.type); return URL.createObjectURL(b); }
+      } catch (e) { c = null; }
+      // 2) belum ada -> ambil dari server lalu simpan ke cache
+      const r = await api('getFile', { file_id: id });
       const bin = atob(r.data), arr = new Uint8Array(bin.length);
       for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
-      driveMime.set(id, r.mime || '');
-      return URL.createObjectURL(new Blob([arr], { type: r.mime || 'application/octet-stream' }));
-    });
+      const mime = r.mime || 'application/octet-stream', blob = new Blob([arr], { type: mime });
+      driveMime.set(id, mime);
+      if (c) c.put(key, new Response(blob, { headers: { 'Content-Type': mime } })).catch(() => {});
+      return URL.createObjectURL(blob);
+    })();
     p.catch(() => driveCache.delete(id));
     driveCache.set(id, p);
   }
@@ -40,6 +52,22 @@ function hydrateDrive(root) {
       if (el.tagName === 'IMG') { el.dataset.lightbox = u; el.classList.remove('animate-pulse'); }
     }).catch(() => { delete el.dataset.loading; el.classList.remove('animate-pulse'); el.alt = 'Gagal memuat file'; });
   });
+}
+const IMG_MAX = 1280, IMG_Q = 0.72, IMG_IN_MAX = 30 * 1024 * 1024;
+async function compressImage(f) {
+  if (!f.type.startsWith('image/') || /gif|svg/.test(f.type)) return f;
+  try {
+    let bmp;
+    try { bmp = await createImageBitmap(f, { imageOrientation: 'from-image' }); } catch (e) { bmp = await createImageBitmap(f); }
+    const sc = Math.min(1, IMG_MAX / Math.max(bmp.width, bmp.height));
+    const w = Math.round(bmp.width * sc), h = Math.round(bmp.height * sc);
+    const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+    const ctx = cv.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, h); ctx.drawImage(bmp, 0, 0, w, h);
+    if (bmp.close) bmp.close();
+    const blob = await new Promise((res) => cv.toBlob(res, 'image/jpeg', IMG_Q));
+    if (!blob || (sc === 1 && blob.size >= f.size)) return f;
+    return new File([blob], f.name.replace(/\.[^.]+$/, '') + '.jpg', { type: 'image/jpeg' });
+  } catch (e) { return f; }
 }
 function saveUrl(u, name) {
   const a = document.createElement('a');
@@ -383,16 +411,19 @@ async function send() {
   const text = $('msgInput').value.trim(), file = state.file;
   if (!text && !file) return;
   if (isAdmin() && !state.peer) return;
+  if (state.busy) { toast('Tunggu, gambar sedang diproses.'); return; }
   const kind = !file ? 'text' : file.type.startsWith('image/') ? 'image' : file.type.startsWith('video/') ? 'video' : 'document';
   const tmp = { msg_id: 'tmp' + Date.now() + Math.random().toString(36).slice(2, 6), sender_id: isAdmin() ? 'admin' : state.session.user_id, text, file_type: kind, file_name: file ? file.name : '', file_url: file && kind === 'image' ? URL.createObjectURL(file) : '', timestamp: Date.now(), is_read: false, pending: true };
   const key = peerKey();
+  let sent = null;
   state.pending.push(tmp);
   appendEl(tmp); scrollBottom();
   $('msgInput').value = ''; autosize(); clearAttach();
   try {
     const payload = { text, peer_id: isAdmin() ? state.peer.user_id : '' };
     if (file) payload.file = { name: file.name, mime: file.type || 'application/octet-stream', data: await toBase64(file) };
-    await api('sendMessage', payload);
+    const r = await api('sendMessage', payload);
+    sent = r.message;
   } catch (e) {
     toast(file ? 'Upload gagal: ' + e.message : 'Pesan gagal terkirim: ' + e.message, 'error');
     if (text && !$('msgInput').value) { $('msgInput').value = text; autosize(); }
@@ -400,7 +431,16 @@ async function send() {
     state.pending = state.pending.filter((p) => p !== tmp);
     const el = $('msgs').querySelector('[data-id="' + tmp.msg_id + '"]'); if (el) el.remove();
     if (tmp.file_url) setTimeout(() => URL.revokeObjectURL(tmp.file_url), 3000);
-    if (key === peerKey()) { try { state.sig = ''; await loadMessages(true); } catch (e) {} }
+    if (key === peerKey()) {
+      if (sent) {
+        // pengirim memakai salinan lokal -> tidak perlu mengunduh ulang filenya
+        if (file && /^drive:/.test(sent.file_url)) {
+          const id = sent.file_url.slice(6);
+          driveCache.set(id, Promise.resolve(URL.createObjectURL(file))); driveMime.set(id, file.type || '');
+        }
+        if (!$('msgs').querySelector('[data-id="' + sent.msg_id + '"]')) { state.msgs.push(sent); appendEl(sent); scrollBottom(); }
+      } else { try { state.sig = ''; await loadMessages(true); } catch (e) {} }
+    }
   }
 }
 function autosize() {
@@ -409,9 +449,22 @@ function autosize() {
 }
 
 /* ---------- Lampiran ---------- */
-function pickFile(f) {
-  if (!f) return;
-  if (f.size > MAX_FILE) { toast('Ukuran file maksimal 10 MB.', 'error'); return; }
+async function pickFile(f0) {
+  if (!f0) return;
+  const isImg = f0.type.startsWith('image/');
+  if (isImg ? f0.size > IMG_IN_MAX : f0.size > MAX_FILE) { toast('Ukuran file terlalu besar (maks. ' + (isImg ? '30' : '10') + ' MB).', 'error'); return; }
+  let f = f0;
+  if (isImg) {
+    const my = state.pickId = (state.pickId || 0) + 1;
+    state.busy = true;
+    $('attachName').textContent = f0.name; $('attachSize').textContent = 'Mengompres gambar…';
+    $('attachThumb').innerHTML = '<span class="spin"></span>';
+    $('attachBar').classList.remove('hidden');
+    f = await compressImage(f0);
+    if (my !== state.pickId) return; // dibatalkan saat proses
+    state.busy = false;
+  }
+  if (f.size > MAX_FILE) { toast('Ukuran file maksimal 10 MB.', 'error'); clearAttach(); return; }
   state.file = f;
   $('attachName').textContent = f.name; $('attachSize').textContent = fmtSize(f.size);
   const th = $('attachThumb');
@@ -419,6 +472,7 @@ function pickFile(f) {
   $('attachBar').classList.remove('hidden');
 }
 function clearAttach() {
+  state.pickId = (state.pickId || 0) + 1; state.busy = false;
   state.file = null; $('fileMedia').value = ''; $('fileDoc').value = '';
   $('attachBar').classList.add('hidden'); $('attachThumb').innerHTML = '';
   $('attachMenu').classList.add('hidden');
