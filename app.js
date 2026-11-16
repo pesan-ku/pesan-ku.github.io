@@ -13,7 +13,38 @@ const BASE_PATH = location.pathname.replace(/[^/]*$/, '');
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const safeUrl = (u) => (/^https?:\/\//i.test(u || '') ? u : '');
+const safeUrl = (u) => (/^(https?:|blob:)/i.test(u || '') ? u : '');
+const IMG_EXT = /\.(jpe?g|png|gif|webp|bmp|heic|avif)$/i, VID_EXT = /\.(mp4|webm|mov|m4v|3gp|ogv)$/i;
+
+/* File di Drive yang tidak bisa dibagikan publik (file_url = "drive:ID") diambil lewat backend */
+const driveCache = new Map();
+function fetchDriveBlob(id) {
+  if (!driveCache.has(id)) {
+    const p = api('getFile', { file_id: id }).then((r) => {
+      const bin = atob(r.data), arr = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+      return URL.createObjectURL(new Blob([arr], { type: r.mime || 'application/octet-stream' }));
+    });
+    p.catch(() => driveCache.delete(id));
+    driveCache.set(id, p);
+  }
+  return driveCache.get(id);
+}
+function hydrateDrive(root) {
+  root.querySelectorAll('[data-drive]').forEach((el) => {
+    if (el.dataset.loading) return;
+    el.dataset.loading = '1';
+    fetchDriveBlob(el.dataset.drive).then((u) => {
+      el.src = u;
+      if (el.tagName === 'IMG') { el.dataset.lightbox = u; el.classList.remove('animate-pulse'); }
+    }).catch(() => { delete el.dataset.loading; el.classList.remove('animate-pulse'); el.alt = 'Gagal memuat file'; });
+  });
+}
+async function downloadDrive(id, name) {
+  const u = await fetchDriveBlob(id);
+  const a = document.createElement('a');
+  a.href = u; a.download = name || 'file'; document.body.appendChild(a); a.click(); a.remove();
+}
 
 const state = {
   session: null, settings: { site_name: 'Live Support Chat', logo_url: '' },
@@ -288,11 +319,20 @@ function appendEl(m) {
   el.className = 'flex ' + (isMine(m) ? 'justify-end' : 'justify-start');
   el.innerHTML = bubble(m);
   box.appendChild(el);
+  hydrateDrive(el);
 }
 function bubble(m) {
-  const mine = isMine(m), url = esc(safeUrl(m.file_url)), name = esc(m.file_name);
+  const mine = isMine(m), name = esc(m.file_name), raw = String(m.file_url || '');
+  const did = raw.indexOf('drive:') === 0 ? raw.slice(6) : '';
+  const url = did ? '' : esc(safeUrl(raw));
+  let kind = m.file_type;
+  if (did && kind === 'document') kind = IMG_EXT.test(m.file_name || '') ? 'image' : VID_EXT.test(m.file_name || '') ? 'video' : 'document';
+  m = Object.assign({}, m, { file_type: kind });
   let media = '';
-  if (m.file_type === 'image' && url) media = '<img src="' + url + '" alt="' + name + '" loading="lazy" data-lightbox="' + url + '" class="rounded-lg max-h-64 max-w-full object-cover cursor-pointer mb-1">';
+  if (did && kind === 'image') media = '<img data-drive="' + esc(did) + '" alt="' + name + '" class="animate-pulse bg-black/10 rounded-lg min-w-[160px] min-h-[120px] max-h-64 max-w-full object-cover cursor-pointer mb-1">';
+  else if (did && kind === 'video') media = '<video controls preload="metadata" playsinline data-drive="' + esc(did) + '" class="rounded-lg w-full max-w-[280px] min-h-[120px] mb-1 bg-black"></video>';
+  else if (did) media = '<a href="#" data-drive-dl="' + esc(did) + '" data-name="' + name + '" class="flex items-center gap-3 bg-black/10 rounded-lg p-3 mb-1 min-w-[200px] hover:bg-black/15"><span class="text-2xl">📄</span><span class="truncate flex-1 text-sm font-medium">' + name + '</span><span class="text-lg">↓</span></a>';
+  else if (m.file_type === 'image' && url) media = '<img src="' + url + '" alt="' + name + '" loading="lazy" data-lightbox="' + url + '" class="rounded-lg max-h-64 max-w-full object-cover cursor-pointer mb-1">';
   else if (m.file_type === 'video' && url) media = '<video controls preload="metadata" playsinline class="rounded-lg w-full max-w-[280px] mb-1 bg-black"><source src="' + url + '"></video>';
   else if (m.file_type === 'video' || m.file_type === 'image') media = '<div class="flex items-center gap-2 bg-black/10 rounded-lg p-3 mb-1 text-sm"><span>' + (m.file_type === 'image' ? '🖼️' : '🎥') + '</span><span class="truncate">' + name + '</span></div>';
   else if (m.file_type === 'document') media = '<a ' + (url ? 'href="' + url + '" target="_blank" rel="noopener"' : '') + ' class="flex items-center gap-3 bg-black/10 rounded-lg p-3 mb-1 min-w-[200px] hover:bg-black/15"><span class="text-2xl">📄</span><span class="truncate flex-1 text-sm font-medium">' + name + '</span><span class="text-lg">↓</span></a>';
@@ -462,8 +502,10 @@ function bind() {
     if (e.key === 'Enter' && !e.shiftKey && desktop) { e.preventDefault(); send(); }
   });
   $('msgs').addEventListener('click', (e) => {
+    const dl = e.target.closest('[data-drive-dl]');
+    if (dl) { e.preventDefault(); downloadDrive(dl.dataset.driveDl, dl.dataset.name).catch((x) => toast('Gagal mengunduh: ' + x.message, 'error')); return; }
     const img = e.target.closest('[data-lightbox]');
-    if (img) { $('lbImg').src = img.dataset.lightbox; $('lightbox').classList.remove('hidden'); $('lightbox').classList.add('flex'); }
+    if (img && img.dataset.lightbox) { $('lbImg').src = img.dataset.lightbox; $('lightbox').classList.remove('hidden'); $('lightbox').classList.add('flex'); }
   });
   const closeLb = () => { $('lightbox').classList.add('hidden'); $('lightbox').classList.remove('flex'); $('lbImg').src = ''; };
   $('lbClose').onclick = closeLb;
