@@ -240,6 +240,10 @@ function forceLogout(msg) {
   if (msg) toast(msg, 'error');
 }
 async function logout() {
+  try {
+    const pid = state.os && state.os.User.PushSubscription.id;
+    if (pid) await api('saveOneSignalId', { onesignal_id: pid, remove: true });
+  } catch (e) {}
   try { await api('logout'); } catch (e) {}
   forceLogout();
 }
@@ -322,6 +326,7 @@ function closeChat() {
 
 /* ---------- Pesan ---------- */
 function resetChat() {
+  if ($('emojiPanel')) toggleEmoji(false);
   state.msgs = []; state.sig = ''; state.lastDay = ''; state.pending = [];
   $('msgs').innerHTML = '';
   clearAttach();
@@ -419,6 +424,7 @@ async function send() {
   state.pending.push(tmp);
   appendEl(tmp); scrollBottom();
   $('msgInput').value = ''; autosize(); clearAttach();
+  toggleEmoji(false);
   try {
     const payload = { text, peer_id: isAdmin() ? state.peer.user_id : '' };
     if (file) payload.file = { name: file.name, mime: file.type || 'application/octet-stream', data: await toBase64(file) };
@@ -478,6 +484,62 @@ function clearAttach() {
   $('attachMenu').classList.add('hidden');
 }
 
+/* ---------- Emotikon ---------- */
+const LS_RECENT = 'lsc_recent_emoji';
+const EMOJI = {
+  '😀': '😀 😃 😄 😁 😆 😅 😂 🤣 🥲 😊 😇 🙂 🙃 😉 😌 😍 🥰 😘 😗 😙 😚 😋 😛 😝 😜 🤪 🤨 🧐 🤓 😎 🥳 😏 😒 😞 😔 😟 😕 🙁 😣 😖 😫 😩 🥺 😢 😭 😤 😠 😡 🤬 🤯 😳 🥵 🥶 😱 😨 😰 😥 😓 🤗 🤔 🤭 🤫 😶 😐 😑 😬 🙄 😯 😦 😧 😮 😲 🥱 😴 🤤 😪 😵 🤐 🥴 🤢 🤮 🤧 😷 🤒 🤕',
+  '👍': '👍 👎 👌 ✌️ 🤞 🤟 🤘 🤙 👈 👉 👆 👇 ☝️ ✋ 🤚 🖖 👋 🤝 🙏 👏 🙌 👐 🤲 💪 🫶 ✍️ 🤳 👀 🧠',
+  '❤️': '❤️ 🧡 💛 💚 💙 💜 🖤 🤍 🤎 💔 ❣️ 💕 💞 💓 💗 💖 💘 💝 💯 💢 💥 💫 💦 💤 🔥 ✨ ⭐ 🌟 🎉 🎊',
+  '🐶': '🐶 🐱 🐭 🐹 🐰 🦊 🐻 🐼 🐨 🐯 🦁 🐮 🐷 🐸 🐵 🙈 🙉 🙊 🐔 🐧 🐦 🦆 🦉 🐴 🦄 🐝 🦋 🐢 🐍 🐙 🐬 🐳 🌸 🌹 🌻 🌴 🍀',
+  '🍔': '🍎 🍊 🍋 🍌 🍉 🍇 🍓 🍒 🍑 🥭 🍍 🥥 🥑 🍅 🌽 🥕 🍞 🧀 🍳 🍔 🍟 🍕 🌭 🌮 🍜 🍣 🍦 🍩 🍪 🎂 🍫 ☕ 🍵 🥤 🍺',
+  '⚽': '⚽ 🏀 🏈 ⚾ 🎾 🏐 🎱 🏓 🏸 🎮 🎯 🎵 🎶 🎤 🎧 📱 💻 📷 🎁 🏆 🚗 🏍️ ✈️ 🚀 🏠 💡 📌 📎 ✅ ❌ ⚠️ ❓ ❗'
+};
+let emojiCat = '😀';
+function getRecent() { try { return JSON.parse(localStorage.getItem(LS_RECENT) || '[]'); } catch (e) { return []; } }
+function addRecent(e) {
+  try { localStorage.setItem(LS_RECENT, JSON.stringify([e].concat(getRecent().filter((x) => x !== e)).slice(0, 24))); } catch (x) {}
+}
+function renderEmoji() {
+  const cats = ['🕘'].concat(Object.keys(EMOJI));
+  $('emojiTabs').innerHTML = cats.map((c) =>
+    '<button type="button" data-cat="' + c + '" class="shrink-0 w-10 h-10 text-xl rounded-lg ' + (c === emojiCat ? 'bg-gray-100 border-b-2 border-wa-light' : 'hover:bg-gray-50') + '">' + c + '</button>').join('');
+  const list = emojiCat === '🕘' ? getRecent() : EMOJI[emojiCat].split(' ');
+  $('emojiGrid').innerHTML = list.length
+    ? list.map((e) => '<button type="button" data-e="' + e + '" class="h-10 text-2xl rounded-lg hover:bg-gray-100 flex items-center justify-center">' + e + '</button>').join('')
+    : '<p class="col-span-full text-center text-sm text-gray-500 py-6">Belum ada emotikon terbaru.</p>';
+}
+function toggleEmoji(force) {
+  const open = typeof force === 'boolean' ? force : $('emojiPanel').classList.contains('hidden');
+  if (open) { $('attachMenu').classList.add('hidden'); renderEmoji(); }
+  $('emojiPanel').classList.toggle('hidden', !open);
+  $('btnEmoji').setAttribute('aria-expanded', String(open));
+  $('btnEmoji').textContent = open ? '⌨️' : '😊';
+}
+function insertEmoji(e) {
+  const t = $('msgInput'), s = t.selectionStart == null ? t.value.length : t.selectionStart, en = t.selectionEnd == null ? s : t.selectionEnd;
+  t.value = t.value.slice(0, s) + e + t.value.slice(en);
+  const p = s + e.length; t.setSelectionRange(p, p);
+  autosize(); addRecent(e);
+}
+
+/* ---------- Refresh manual ---------- */
+async function refreshChat() {
+  const b = $('btnRefresh');
+  if (!state.session || b.dataset.busy) return;
+  b.dataset.busy = '1';
+  const ic = b.querySelector('svg'); ic.classList.add('animate-spin');
+  const t0 = Date.now();
+  try {
+    if (isAdmin()) await loadUsers();
+    if (!isAdmin() || state.peer) { state.sig = ''; await loadMessages(true); }
+    loadSettings();
+    toast('Pesan diperbarui.');
+  } catch (e) { toast(e.message, 'error'); }
+  finally {
+    setTimeout(() => { ic.classList.remove('animate-spin'); delete b.dataset.busy; }, Math.max(0, 600 - (Date.now() - t0)));
+  }
+}
+
 /* ---------- Polling ---------- */
 function startPolling() { stopPolling(); tick(); state.timer = setInterval(tick, POLL_MS); }
 function stopPolling() { if (state.timer) clearInterval(state.timer); state.timer = null; }
@@ -530,11 +592,20 @@ async function syncPush() {
   const os = state.os;
   if (!os || !state.session) return;
   const sub = os.User.PushSubscription;
+  // izin browser sudah "granted" tetapi langganan belum aktif -> aktifkan
+  if ('Notification' in window && Notification.permission === 'granted' && !sub.optedIn && !state.optTried) {
+    state.optTried = true;
+    try { await sub.optIn(); } catch (e) {}
+  }
   if (sub.id && sub.optedIn && sub.id !== state.lastPushId) {
     try { await api('saveOneSignalId', { onesignal_id: sub.id }); state.lastPushId = sub.id; } catch (e) {}
   }
 }
 function checkNotifBanner() {
+  if (state.os && state.session && 'Notification' in window && Notification.permission === 'denied' && !sessionStorage.getItem('lsc_nd')) {
+    sessionStorage.setItem('lsc_nd', '1');
+    toast('Notifikasi diblokir browser. Klik ikon gembok di address bar → Notifikasi → Izinkan, lalu muat ulang.', 'error');
+  }
   const show = !!(state.os && state.session && 'Notification' in window && Notification.permission === 'default' && !sessionStorage.getItem('lsc_nb'));
   $('notifBanner').classList.toggle('hidden', !show);
   $('notifBanner').classList.toggle('flex', show);
@@ -576,7 +647,7 @@ function bind() {
   $('userList').addEventListener('click', (e) => { const b = e.target.closest('[data-uid]'); if (b) openChat(b.dataset.uid); });
   $('btnBack').onclick = () => { if (history.state && history.state.chat) history.back(); else closeChat(); };
   window.addEventListener('popstate', () => { if (state.peer) closeChat(); });
-  $('btnAttach').onclick = (e) => { e.stopPropagation(); $('attachMenu').classList.toggle('hidden'); };
+  $('btnAttach').onclick = (e) => { e.stopPropagation(); toggleEmoji(false); $('attachMenu').classList.toggle('hidden'); };
   document.addEventListener('click', (e) => { if (!e.target.closest('#attachMenu')) $('attachMenu').classList.add('hidden'); });
   $('pickMedia').onclick = () => { $('attachMenu').classList.add('hidden'); $('fileMedia').click(); };
   $('pickDoc').onclick = () => { $('attachMenu').classList.add('hidden'); $('fileDoc').click(); };
@@ -600,7 +671,16 @@ function bind() {
   $('lbClose').onclick = closeLb;
   $('lbDl').onclick = () => { const s = $('lbImg').getAttribute('src') || '', n = $('lbDl').dataset.name; if (s.indexOf('blob:') === 0) saveUrl(s, n); else doDownload('', s, n); };
   $('lightbox').addEventListener('click', (e) => { if (e.target.id !== 'lbImg' && !e.target.closest('#lbDl')) closeLb(); });
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeLb(); closeSettings(); } });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeLb(); closeSettings(); toggleEmoji(false); } });
+  $('btnRefresh').onclick = refreshChat;
+  $('btnEmoji').addEventListener('pointerdown', (e) => e.preventDefault()); // fokus ketikan tidak hilang
+  $('btnEmoji').onclick = (e) => { e.stopPropagation(); toggleEmoji(); };
+  $('emojiPanel').addEventListener('pointerdown', (e) => e.preventDefault());
+  $('emojiPanel').addEventListener('click', (e) => {
+    const c = e.target.closest('[data-cat]'); if (c) { emojiCat = c.dataset.cat; renderEmoji(); return; }
+    const m = e.target.closest('[data-e]'); if (m) insertEmoji(m.dataset.e);
+  });
+  document.addEventListener('click', (e) => { if (!e.target.closest('#emojiPanel') && !e.target.closest('#btnEmoji')) toggleEmoji(false); });
   $('notifOn').onclick = enableNotif;
   $('notifOff').onclick = () => { sessionStorage.setItem('lsc_nb', '1'); checkNotifBanner(); };
   document.addEventListener('visibilitychange', () => { if (!document.hidden) tick(); });
