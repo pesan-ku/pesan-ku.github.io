@@ -17,12 +17,13 @@ const safeUrl = (u) => (/^(https?:|blob:)/i.test(u || '') ? u : '');
 const IMG_EXT = /\.(jpe?g|png|gif|webp|bmp|heic|avif)$/i, VID_EXT = /\.(mp4|webm|mov|m4v|3gp|ogv)$/i;
 
 /* File di Drive yang tidak bisa dibagikan publik (file_url = "drive:ID") diambil lewat backend */
-const driveCache = new Map();
+const driveCache = new Map(), driveMime = new Map();
 function fetchDriveBlob(id) {
   if (!driveCache.has(id)) {
     const p = api('getFile', { file_id: id }).then((r) => {
       const bin = atob(r.data), arr = new Uint8Array(bin.length);
       for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+      driveMime.set(id, r.mime || '');
       return URL.createObjectURL(new Blob([arr], { type: r.mime || 'application/octet-stream' }));
     });
     p.catch(() => driveCache.delete(id));
@@ -40,10 +41,40 @@ function hydrateDrive(root) {
     }).catch(() => { delete el.dataset.loading; el.classList.remove('animate-pulse'); el.alt = 'Gagal memuat file'; });
   });
 }
-async function downloadDrive(id, name) {
-  const u = await fetchDriveBlob(id);
+function saveUrl(u, name) {
   const a = document.createElement('a');
   a.href = u; a.download = name || 'file'; document.body.appendChild(a); a.click(); a.remove();
+}
+async function downloadDrive(id, name) { saveUrl(await fetchDriveBlob(id), name); }
+async function doDownload(did, url, name) {
+  if (did) return downloadDrive(did, name);
+  try {
+    const r = await fetch(url); if (!r.ok) throw new Error('x');
+    const u = URL.createObjectURL(await r.blob());
+    saveUrl(u, name); setTimeout(() => URL.revokeObjectURL(u), 10000);
+  } catch (e) { window.open(url, '_blank', 'noopener'); }
+}
+function openLightbox(src, name) {
+  $('lbImg').src = src; $('lbImg').alt = name || '';
+  $('lbDl').dataset.name = name || 'gambar';
+  $('lightbox').classList.remove('hidden'); $('lightbox').classList.add('flex');
+}
+async function fileAction(btn) {
+  const d = btn.dataset, did = d.did || '', url = d.url || '', name = d.name || 'file';
+  if (d.act === 'dl') return doDownload(did, url, name);
+  if (d.kind === 'image') return openLightbox(did ? await fetchDriveBlob(did) : url, name);
+  const w = window.open('', '_blank'); // dibuka sinkron agar tidak diblokir pop-up blocker
+  try {
+    if (!did) {
+      const id = (url.match(/[?&]id=([^&]+)/) || [])[1];
+      const target = id ? 'https://drive.google.com/file/d/' + id + '/view' : url;
+      if (w) w.location.href = target; else toast('Izinkan pop-up untuk melihat file.', 'error');
+      return;
+    }
+    const u = await fetchDriveBlob(did), mime = driveMime.get(did) || '';
+    if (!/^(image|video|audio|text)\/|application\/pdf/.test(mime)) { if (w) w.close(); return saveUrl(u, name); }
+    if (w) w.location.href = u; else toast('Izinkan pop-up untuk melihat file.', 'error');
+  } catch (e) { if (w) w.close(); throw e; }
 }
 
 const state = {
@@ -331,11 +362,15 @@ function bubble(m) {
   let media = '';
   if (did && kind === 'image') media = '<img data-drive="' + esc(did) + '" alt="' + name + '" class="animate-pulse bg-black/10 rounded-lg min-w-[160px] min-h-[120px] max-h-64 max-w-full object-cover cursor-pointer mb-1">';
   else if (did && kind === 'video') media = '<video controls preload="metadata" playsinline data-drive="' + esc(did) + '" class="rounded-lg w-full max-w-[280px] min-h-[120px] mb-1 bg-black"></video>';
-  else if (did) media = '<a href="#" data-drive-dl="' + esc(did) + '" data-name="' + name + '" class="flex items-center gap-3 bg-black/10 rounded-lg p-3 mb-1 min-w-[200px] hover:bg-black/15"><span class="text-2xl">📄</span><span class="truncate flex-1 text-sm font-medium">' + name + '</span><span class="text-lg">↓</span></a>';
+  else if (did) media = '<div class="flex items-center gap-3 bg-black/10 rounded-lg p-3 mb-1 min-w-[200px]"><span class="text-2xl">📄</span><span class="truncate flex-1 text-sm font-medium">' + name + '</span></div>';
   else if (m.file_type === 'image' && url) media = '<img src="' + url + '" alt="' + name + '" loading="lazy" data-lightbox="' + url + '" class="rounded-lg max-h-64 max-w-full object-cover cursor-pointer mb-1">';
   else if (m.file_type === 'video' && url) media = '<video controls preload="metadata" playsinline class="rounded-lg w-full max-w-[280px] mb-1 bg-black"><source src="' + url + '"></video>';
   else if (m.file_type === 'video' || m.file_type === 'image') media = '<div class="flex items-center gap-2 bg-black/10 rounded-lg p-3 mb-1 text-sm"><span>' + (m.file_type === 'image' ? '🖼️' : '🎥') + '</span><span class="truncate">' + name + '</span></div>';
-  else if (m.file_type === 'document') media = '<a ' + (url ? 'href="' + url + '" target="_blank" rel="noopener"' : '') + ' class="flex items-center gap-3 bg-black/10 rounded-lg p-3 mb-1 min-w-[200px] hover:bg-black/15"><span class="text-2xl">📄</span><span class="truncate flex-1 text-sm font-medium">' + name + '</span><span class="text-lg">↓</span></a>';
+  else if (m.file_type === 'document') media = '<div class="flex items-center gap-3 bg-black/10 rounded-lg p-3 mb-1 min-w-[200px]"><span class="text-2xl">📄</span><span class="truncate flex-1 text-sm font-medium">' + name + '</span></div>';
+  if (!m.pending && (did || url) && kind !== 'text') {
+    const b = (act, label) => '<button type="button" data-act="' + act + '" data-did="' + esc(did) + '" data-url="' + url + '" data-kind="' + esc(kind) + '" data-name="' + name + '" class="flex-1 text-xs font-semibold text-wa bg-black/5 hover:bg-black/10 rounded-lg py-1.5 px-3">' + label + '</button>';
+    media += '<div class="flex gap-2 mb-1">' + b('view', '👁️ Lihat') + b('dl', '⬇️ Unduh') + '</div>';
+  }
   const text = m.text ? '<div class="whitespace-pre-wrap break-words text-[15px] leading-snug">' + esc(m.text) + '</div>' : '';
   let status = '';
   if (mine) status = m.pending ? (m.file_type !== 'text' ? '<span class="spin"></span>' : '<span>🕓</span>') : '<span class="tick ' + (m.is_read ? 'text-[#53bdeb]' : 'text-gray-400') + '">✓✓</span>';
@@ -502,14 +537,15 @@ function bind() {
     if (e.key === 'Enter' && !e.shiftKey && desktop) { e.preventDefault(); send(); }
   });
   $('msgs').addEventListener('click', (e) => {
-    const dl = e.target.closest('[data-drive-dl]');
-    if (dl) { e.preventDefault(); downloadDrive(dl.dataset.driveDl, dl.dataset.name).catch((x) => toast('Gagal mengunduh: ' + x.message, 'error')); return; }
+    const act = e.target.closest('[data-act]');
+    if (act) { fileAction(act).catch((x) => toast('Gagal memuat file: ' + x.message, 'error')); return; }
     const img = e.target.closest('[data-lightbox]');
-    if (img && img.dataset.lightbox) { $('lbImg').src = img.dataset.lightbox; $('lightbox').classList.remove('hidden'); $('lightbox').classList.add('flex'); }
+    if (img && img.dataset.lightbox) openLightbox(img.dataset.lightbox, img.alt);
   });
   const closeLb = () => { $('lightbox').classList.add('hidden'); $('lightbox').classList.remove('flex'); $('lbImg').src = ''; };
   $('lbClose').onclick = closeLb;
-  $('lightbox').addEventListener('click', (e) => { if (e.target.id !== 'lbImg') closeLb(); });
+  $('lbDl').onclick = () => { const s = $('lbImg').getAttribute('src') || '', n = $('lbDl').dataset.name; if (s.indexOf('blob:') === 0) saveUrl(s, n); else doDownload('', s, n); };
+  $('lightbox').addEventListener('click', (e) => { if (e.target.id !== 'lbImg' && !e.target.closest('#lbDl')) closeLb(); });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeLb(); closeSettings(); } });
   $('notifOn').onclick = enableNotif;
   $('notifOff').onclick = () => { sessionStorage.setItem('lsc_nb', '1'); checkNotifBanner(); };
