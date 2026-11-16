@@ -1,8 +1,8 @@
 /* =====================================================
  * KONFIGURASI — isi 2 nilai ini
  * ===================================================== */
-const GAS_WEB_APP_URL = 'https://script.google.com/macros/s/ISI_DEPLOYMENT_ID/exec';
-const ONESIGNAL_APP_ID = 'ISI_ONESIGNAL_APP_ID';
+const GAS_WEB_APP_URL = 'https://script.google.com/macros/s/AKfycbwVg-F9GXx9GIeiaHvr5OsdPeRbdV2HOs99_eD_Uxcb-WYDvkTqxA-T-VrKh2vxSWZFCw/exec';
+const ONESIGNAL_APP_ID = '5bfaa819-83a3-47e7-9f0f-4f7c9467af1c';
 /* ===================================================== */
 
 const POLL_MS = 4000;
