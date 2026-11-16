@@ -1,7 +1,7 @@
 /* Service Worker: push OneSignal + cache offline untuk app shell */
 importScripts('https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.sw.js');
 
-const CACHE = 'lsc-v3'; // naikkan versi (lsc-v2, ...) setiap kali Anda mengubah file frontend
+const CACHE = 'lsc-v4'; // naikkan versi (lsc-v2, ...) setiap kali Anda mengubah file frontend
 const SHELL = ['./', 'index.html', 'app.js', 'manifest.json', 'icon-192.png', 'icon-512.png'];
 const SKIP = ['script.google.com', 'script.googleusercontent.com', 'drive.google.com', 'googleusercontent.com', 'onesignal.com'];
 
@@ -11,7 +11,7 @@ self.addEventListener('install', (e) => {
 
 self.addEventListener('activate', (e) => {
   e.waitUntil(
-    caches.keys().then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k)))).then(() => self.clients.claim())
+    caches.keys().then((keys) => Promise.all(keys.filter((k) => k !== CACHE && k !== 'lsc-files').map((k) => caches.delete(k)))).then(() => self.clients.claim())
   );
 });
 
