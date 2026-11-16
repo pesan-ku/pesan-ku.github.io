@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<title>Live Support Chat</title>
+<meta name="theme-color" content="#008069">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Live Support">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" type="image/png" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = { theme: { extend: { colors: { wa: { DEFAULT: '#008069', light: '#00A884', bubble: '#D9FDD3', bg: '#EFEAE2', ink: '#111B21' } } } } };
+</script>
+<script src="https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js" defer></script>
+<style>
+  html, body { height: 100%; margin: 0; overscroll-behavior: none; -webkit-tap-highlight-color: transparent; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: #fff; color: #111B21; }
+  .chat-bg {
+    background-color: #EFEAE2;
+    background-image: radial-gradient(rgba(0,0,0,.055) 1.2px, transparent 1.2px), radial-gradient(rgba(0,0,0,.035) 1px, transparent 1px);
+    background-size: 22px 22px, 22px 22px; background-position: 0 0, 11px 11px;
+  }
+  .spin { width: 14px; height: 14px; border: 2px solid rgba(0,0,0,.2); border-top-color: #008069; border-radius: 50%; animation: spin .7s linear infinite; display: inline-block; }
+  .spin-w { border-color: rgba(255,255,255,.4); border-top-color: #fff; width: 20px; height: 20px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .toast { animation: tin .2s ease-out; }
+  @keyframes tin { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: none; } }
+  #msgInput { max-height: 112px; }
+  .sb::-webkit-scrollbar { width: 6px; } .sb::-webkit-scrollbar-thumb { background: rgba(0,0,0,.2); border-radius: 6px; }
+  @media (prefers-reduced-motion: reduce) { * { animation-duration: .01ms !important; scroll-behavior: auto !important; } }
+</style>
+</head>
+<body>
+<div id="app" class="h-[100dvh] overflow-hidden flex flex-col bg-white">
+
+  <!-- ===== LOGIN / REGISTER ===== -->
+  <div id="authView" class="hidden flex-1 overflow-y-auto bg-[#F0F2F5]">
+    <div class="min-h-full flex items-center justify-center p-4">
+      <div class="w-full max-w-sm bg-white rounded-2xl shadow-lg p-6">
+        <div class="flex flex-col items-center text-center mb-5">
+          <img data-logo src="icon-192.png" alt="Logo" class="w-16 h-16 rounded-full object-cover bg-gray-100 mb-3">
+          <h1 data-site-name class="text-xl font-bold text-wa-ink">Live Support Chat</h1>
+          <p class="text-sm text-gray-500 mt-1">Masuk untuk mengobrol langsung dengan admin</p>
+        </div>
+        <div class="grid grid-cols-2 bg-gray-100 rounded-full p-1 mb-4 text-sm font-medium">
+          <button id="tabLogin" type="button" class="py-2 rounded-full bg-white shadow-sm text-wa">Masuk</button>
+          <button id="tabRegister" type="button" class="py-2 rounded-full text-gray-500">Daftar Akun</button>
+        </div>
+        <form id="authForm" class="space-y-3" autocomplete="on">
+          <input id="inUser" type="text" required minlength="3" maxlength="24" autocomplete="username" autocapitalize="none" placeholder="Username" class="w-full rounded-xl border border-gray-300 px-4 py-3 text-[16px] outline-none focus:border-wa-light focus:ring-2 focus:ring-wa-light/30">
+          <input id="inPass" type="password" required minlength="6" autocomplete="current-password" placeholder="Password" class="w-full rounded-xl border border-gray-300 px-4 py-3 text-[16px] outline-none focus:border-wa-light focus:ring-2 focus:ring-wa-light/30">
+          <input id="inPass2" type="password" autocomplete="new-password" placeholder="Ulangi password" class="hidden w-full rounded-xl border border-gray-300 px-4 py-3 text-[16px] outline-none focus:border-wa-light focus:ring-2 focus:ring-wa-light/30">
+          <p id="authErr" class="hidden text-sm text-red-600"></p>
+          <button id="authBtn" type="submit" class="w-full h-12 rounded-xl bg-wa-light hover:bg-wa text-white font-semibold flex items-center justify-center gap-2 disabled:opacity-60">Masuk</button>
+        </form>
+        <div id="installBox" class="hidden mt-4">
+          <button id="installBtn" type="button" class="hidden w-full text-sm rounded-xl border border-wa-light text-wa py-2.5 font-medium hover:bg-wa-light/10">Instal Aplikasi</button>
+          <p id="iosHint" class="hidden text-xs text-gray-500 text-center">Di iPhone/iPad: ketuk tombol Bagikan, lalu pilih “Tambah ke Layar Utama”.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== APLIKASI UTAMA ===== -->
+  <div id="mainView" class="hidden flex-1 min-h-0 flex">
+
+    <!-- Panel kiri: daftar user (admin) -->
+    <aside id="sidebar" class="hidden">
+      <header class="h-16 shrink-0 bg-wa text-white flex items-center gap-3 px-3">
+        <img data-logo src="icon-192.png" alt="Logo" class="w-10 h-10 rounded-full object-cover bg-white/20">
+        <div class="min-w-0 flex-1">
+          <div data-site-name class="font-semibold truncate">Live Support Chat</div>
+          <div class="text-xs text-white/80">Admin</div>
+        </div>
+        <button id="btnSettings" title="Pengaturan website" aria-label="Pengaturan website" class="w-10 h-10 rounded-full hover:bg-white/10 flex items-center justify-center">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+        </button>
+        <button id="btnLogoutA" title="Keluar" aria-label="Keluar" class="w-10 h-10 rounded-full hover:bg-white/10 flex items-center justify-center">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/></svg>
+        </button>
+      </header>
+      <div class="p-2 bg-white border-b border-gray-100">
+        <input id="searchUser" type="search" placeholder="Cari pengguna" class="w-full rounded-full bg-[#F0F2F5] px-4 py-2 text-[16px] outline-none focus:ring-2 focus:ring-wa-light/40">
+      </div>
+      <div id="userList" class="flex-1 overflow-y-auto sb"></div>
+    </aside>
+
+    <!-- Panel kanan: ruang chat -->
+    <section id="chatPane" class="flex-1 min-w-0 h-full flex flex-col">
+      <div id="emptyState" class="hidden flex-1 chat-bg items-center justify-center text-center p-8">
+        <div><div class="text-5xl mb-3">💬</div><p class="font-semibold text-wa-ink">Pilih pengguna untuk mulai mengobrol</p><p class="text-sm text-gray-500 mt-1">Percakapan akan tampil di sini.</p></div>
+      </div>
+
+      <div id="chatWrap" class="flex-1 min-h-0 flex flex-col">
+        <header class="h-16 shrink-0 bg-wa text-white flex items-center gap-3 px-3 shadow z-20">
+          <button id="btnBack" aria-label="Kembali" class="hidden w-10 h-10 -ml-1 rounded-full hover:bg-white/10 text-2xl leading-none">←</button>
+          <img id="chatAvatar" src="icon-192.png" alt="" class="w-10 h-10 rounded-full object-cover bg-white/20">
+          <div class="min-w-0 flex-1">
+            <div id="chatTitle" class="font-semibold truncate"></div>
+            <div id="chatSub" class="text-xs text-white/80 truncate"></div>
+          </div>
+          <button id="btnSettingsU" title="Pengaturan website" aria-label="Pengaturan website" class="hidden w-10 h-10 rounded-full hover:bg-white/10 items-center justify-center">⚙️</button>
+          <button id="btnLogoutU" title="Keluar" aria-label="Keluar" class="hidden w-10 h-10 rounded-full hover:bg-white/10 items-center justify-center">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/></svg>
+          </button>
+        </header>
+
+        <div id="notifBanner" class="hidden shrink-0 bg-amber-50 border-b border-amber-200 text-amber-900 text-sm px-3 py-2 items-center gap-2">
+          <span class="flex-1">Aktifkan notifikasi agar tidak ketinggalan pesan baru.</span>
+          <button id="notifOn" class="px-3 py-1 rounded-full bg-wa text-white text-xs font-semibold">Aktifkan</button>
+          <button id="notifOff" aria-label="Tutup" class="px-1 text-lg leading-none">✕</button>
+        </div>
+
+        <div id="msgs" class="chat-bg flex-1 min-h-0 overflow-y-auto sb px-3 py-3 md:px-10 space-y-1.5"></div>
+
+        <div id="attachBar" class="hidden shrink-0 bg-[#F0F2F5] px-3 pt-2">
+          <div class="flex items-center gap-3 bg-white rounded-xl p-2 shadow-sm">
+            <div id="attachThumb" class="w-12 h-12 rounded-lg bg-gray-100 overflow-hidden flex items-center justify-center text-2xl shrink-0"></div>
+            <div class="min-w-0 flex-1"><div id="attachName" class="text-sm font-medium truncate"></div><div id="attachSize" class="text-xs text-gray-500"></div></div>
+            <button id="attachCancel" aria-label="Batalkan lampiran" class="w-9 h-9 rounded-full hover:bg-gray-100 text-gray-600">✕</button>
+          </div>
+        </div>
+
+        <footer class="relative shrink-0 bg-[#F0F2F5] px-2 pt-2 pb-[calc(0.5rem+env(safe-area-inset-bottom))] flex items-end gap-2">
+          <div id="attachMenu" class="hidden absolute bottom-[calc(100%-0.25rem)] left-2 bg-white rounded-xl shadow-xl border border-gray-100 py-1 z-30 w-48">
+            <button id="pickMedia" class="w-full text-left px-4 py-2.5 text-sm hover:bg-gray-50">🖼️ Foto atau video</button>
+            <button id="pickDoc" class="w-full text-left px-4 py-2.5 text-sm hover:bg-gray-50">📄 Dokumen</button>
+          </div>
+          <button id="btnAttach" aria-label="Lampirkan file" class="w-11 h-11 shrink-0 rounded-full hover:bg-gray-200 text-2xl flex items-center justify-center">📎</button>
+          <textarea id="msgInput" rows="1" placeholder="Ketik pesan" class="flex-1 min-w-0 resize-none rounded-[22px] bg-white px-4 py-2 text-[16px] leading-6 outline-none shadow-sm focus:ring-2 focus:ring-wa-light/40"></textarea>
+          <button id="btnSend" aria-label="Kirim" class="w-11 h-11 shrink-0 rounded-full bg-wa-light hover:bg-wa text-white flex items-center justify-center">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M2.5 20.5 22 12 2.5 3.5l.01 6.6L16 12 2.51 13.9z"/></svg>
+          </button>
+          <input id="fileMedia" type="file" accept="image/*,video/*" class="hidden">
+          <input id="fileDoc" type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.zip,.rar,.7z,application/*,text/*" class="hidden">
+        </footer>
+      </div>
+    </section>
+  </div>
+</div>
+
+<!-- ===== MODAL PENGATURAN ADMIN ===== -->
+<div id="settingsModal" class="hidden fixed inset-0 z-40 bg-black/50 items-center justify-center p-4">
+  <div class="w-full max-w-md bg-white rounded-2xl shadow-2xl overflow-hidden">
+    <div class="px-5 py-4 border-b border-gray-100 flex items-center justify-between"><h2 class="font-bold text-lg">Pengaturan Website</h2><button id="setClose" aria-label="Tutup" class="w-9 h-9 rounded-full hover:bg-gray-100">✕</button></div>
+    <div class="p-5 space-y-4">
+      <div class="flex items-center gap-3 bg-wa text-white rounded-xl p-3">
+        <img id="prevLogo" src="icon-192.png" alt="" class="w-12 h-12 rounded-full object-cover bg-white/20">
+        <div class="min-w-0"><div id="prevName" class="font-semibold truncate"></div><div class="text-xs text-white/80">Pratinjau header</div></div>
+      </div>
+      <label class="block text-sm font-medium">Nama website
+        <input id="setName" maxlength="60" class="mt-1 w-full rounded-xl border border-gray-300 px-4 py-2.5 text-[16px] outline-none focus:border-wa-light focus:ring-2 focus:ring-wa-light/30">
+      </label>
+      <label class="block text-sm font-medium">Link gambar logo
+        <input id="setLogo" type="url" placeholder="https://contoh.com/logo.png" class="mt-1 w-full rounded-xl border border-gray-300 px-4 py-2.5 text-[16px] outline-none focus:border-wa-light focus:ring-2 focus:ring-wa-light/30">
+      </label>
+    </div>
+    <div class="px-5 py-4 bg-gray-50 flex justify-end gap-2">
+      <button id="setCancel" class="px-4 py-2.5 rounded-xl hover:bg-gray-200 text-sm font-medium">Batal</button>
+      <button id="setSave" class="px-5 py-2.5 rounded-xl bg-wa-light hover:bg-wa text-white text-sm font-semibold flex items-center gap-2">Simpan perubahan</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== LIGHTBOX ===== -->
+<div id="lightbox" class="hidden fixed inset-0 z-50 bg-black/90 items-center justify-center p-4">
+  <button id="lbClose" aria-label="Tutup" class="absolute top-[calc(1rem+env(safe-area-inset-top))] right-4 w-11 h-11 rounded-full bg-white/10 text-white text-xl">✕</button>
+  <img id="lbImg" src="" alt="Gambar penuh" class="max-w-full max-h-full object-contain rounded">
+</div>
+
+<!-- ===== TOAST ===== -->
+<div id="toasts" class="fixed top-[calc(1rem+env(safe-area-inset-top))] left-1/2 -translate-x-1/2 z-[60] flex flex-col gap-2 w-[90%] max-w-sm pointer-events-none"></div>
+
+<script src="app.js" defer></script>
+</body>
+</html>
