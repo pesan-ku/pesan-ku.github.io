@@ -404,7 +404,7 @@ function bubble(m) {
     const b = (act, label) => '<button type="button" data-act="' + act + '" data-did="' + esc(did) + '" data-url="' + url + '" data-kind="' + esc(kind) + '" data-name="' + name + '" class="flex-1 text-xs font-semibold text-wa bg-black/5 hover:bg-black/10 rounded-lg py-1.5 px-3">' + label + '</button>';
     media += '<div class="flex gap-2 mb-1">' + b('view', '👁️ Lihat') + b('dl', '⬇️ Unduh') + '</div>';
   }
-  const text = m.text ? '<div class="whitespace-pre-wrap break-words text-[15px] leading-snug">' + esc(m.text) + '</div>' : '';
+  const text = m.text ? '<div class="whitespace-pre-wrap break-words msg-text leading-snug">' + esc(m.text) + '</div>' : '';
   let status = '';
   if (mine) status = m.pending ? (m.file_type !== 'text' ? '<span class="spin"></span>' : '<span>🕓</span>') : '<span class="tick ' + (m.is_read ? 'text-[#53bdeb]' : 'text-gray-400') + '">✓✓</span>';
   return '<div class="flex flex-col max-w-[85%] md:max-w-[65%] min-w-[84px] px-2.5 py-1.5 shadow-sm text-wa-ink rounded-2xl ' + (mine ? 'bg-wa-bubble rounded-tr-none' : 'bg-white rounded-tl-none') + '">' +
@@ -482,6 +482,87 @@ function clearAttach() {
   state.file = null; $('fileMedia').value = ''; $('fileDoc').value = '';
   $('attachBar').classList.add('hidden'); $('attachThumb').innerHTML = '';
   $('attachMenu').classList.add('hidden');
+}
+
+/* ---------- Tampilan (ukuran huruf, tema, wallpaper) ---------- */
+const LS_PREFS = 'lsc_prefs', LS_WALL = 'lsc_wall';
+const FONTS = { s: 13, m: 15, l: 18, xl: 21 };
+const FONT_LABEL = { s: 'Kecil', m: 'Sedang', l: 'Besar', xl: 'Sangat besar' };
+const THEMES = { light: '☀️ Terang', dark: '🌙 Gelap', auto: '🌓 Otomatis' };
+const WALLS = [
+  { id: 'default', name: 'Bawaan' }, { id: 'w1', c: '#EFEAE2', name: 'Krem' }, { id: 'w2', c: '#D9E7DC', name: 'Hijau' },
+  { id: 'w3', c: '#D6E4F0', name: 'Biru' }, { id: 'w4', c: '#F3DDE4', name: 'Merah muda' }, { id: 'w5', c: '#E6E0F3', name: 'Ungu' },
+  { id: 'w6', c: '#E5E7EB', name: 'Abu-abu' }, { id: 'w7', c: '#1F2C34', name: 'Gelap' }, { id: 'w8', c: '#0B141A', name: 'Hitam' }
+];
+const prefs = { font: 'm', theme: 'light', wall: 'default' };
+function loadPrefs() {
+  try { const p = JSON.parse(localStorage.getItem(LS_PREFS) || 'null'); if (p) { if (FONTS[p.font]) prefs.font = p.font; if (THEMES[p.theme]) prefs.theme = p.theme; if (p.wall) prefs.wall = p.wall; } } catch (e) {}
+}
+function savePrefs() { try { localStorage.setItem(LS_PREFS, JSON.stringify(prefs)); } catch (e) {} }
+function getWall() { try { return localStorage.getItem(LS_WALL) || ''; } catch (e) { return ''; } }
+const isDark = () => prefs.theme === 'dark' || (prefs.theme === 'auto' && matchMedia('(prefers-color-scheme: dark)').matches);
+function applyWall(el) {
+  if (!el) return;
+  el.style.backgroundImage = ''; el.style.backgroundColor = ''; el.style.backgroundSize = ''; el.style.backgroundPosition = '';
+  if (prefs.wall === 'custom') {
+    const d = getWall();
+    if (d) { el.style.backgroundImage = 'url("' + d + '")'; el.style.backgroundSize = 'cover'; el.style.backgroundPosition = 'center'; return; }
+  }
+  const w = WALLS.find((x) => x.id === prefs.wall);
+  if (w && w.c) { el.style.backgroundImage = 'none'; el.style.backgroundColor = w.c; }
+}
+function applyPrefs() {
+  const root = document.documentElement;
+  root.dataset.theme = isDark() ? 'dark' : 'light';
+  root.style.setProperty('--msg-fs', FONTS[prefs.font] + 'px');
+  applyWall($('msgs')); applyWall($('prefPreview'));
+}
+function renderPrefUI() {
+  const on = 'bg-wa-light text-white', off = 'bg-gray-100';
+  $('prefFont').innerHTML = Object.keys(FONTS).map((k) =>
+    '<button type="button" data-font="' + k + '" class="rounded-xl py-2 px-1 flex flex-col items-center justify-center ' + (prefs.font === k ? on : off) + '"><span class="font-semibold leading-none" style="font-size:' + (FONTS[k] + 2) + 'px">Aa</span><span class="text-[10px] mt-1">' + FONT_LABEL[k] + '</span></button>').join('');
+  $('prefTheme').innerHTML = Object.keys(THEMES).map((k) =>
+    '<button type="button" data-theme="' + k + '" class="rounded-xl py-2.5 text-sm font-medium ' + (prefs.theme === k ? on : off) + '">' + THEMES[k] + '</button>').join('');
+  const custom = getWall();
+  const ring = (id) => (prefs.wall === id ? ' ring-2 ring-wa-light ring-offset-2' : ' border border-gray-300');
+  let html = WALLS.map((w) =>
+    '<button type="button" data-wall="' + w.id + '" title="' + w.name + '" aria-label="' + w.name + '" class="aspect-square rounded-xl overflow-hidden' + (w.c ? '' : ' chat-bg') + ring(w.id) + '"' + (w.c ? ' style="background:' + w.c + '"' : '') + '></button>').join('');
+  if (custom) html += '<button type="button" data-wall="custom" title="Gambar saya" aria-label="Gambar saya" class="aspect-square rounded-xl overflow-hidden' + ring('custom') + '" style="background:url(\'' + custom + '\') center/cover"></button>';
+  html += '<button type="button" data-wall="upload" title="Unggah gambar" aria-label="Unggah gambar" class="aspect-square rounded-xl border-2 border-dashed border-gray-300 text-2xl text-gray-500 flex items-center justify-center">＋</button>';
+  $('prefWall').innerHTML = html;
+  $('wallDel').classList.toggle('hidden', !custom);
+}
+function openPref() { renderPrefUI(); applyPrefs(); $('prefModal').classList.remove('hidden'); $('prefModal').classList.add('flex'); }
+function closePref() { $('prefModal').classList.add('hidden'); $('prefModal').classList.remove('flex'); }
+async function setCustomWall(f) {
+  if (!f || !f.type.startsWith('image/')) { toast('Pilih file gambar.', 'error'); return; }
+  try {
+    let bmp;
+    try { bmp = await createImageBitmap(f, { imageOrientation: 'from-image' }); } catch (e) { bmp = await createImageBitmap(f); }
+    const sc = Math.min(1, 1280 / Math.max(bmp.width, bmp.height));
+    const cv = document.createElement('canvas'); cv.width = Math.round(bmp.width * sc); cv.height = Math.round(bmp.height * sc);
+    cv.getContext('2d').drawImage(bmp, 0, 0, cv.width, cv.height);
+    if (bmp.close) bmp.close();
+    localStorage.setItem(LS_WALL, cv.toDataURL('image/jpeg', 0.7));
+    prefs.wall = 'custom'; savePrefs(); applyPrefs(); renderPrefUI();
+  } catch (e) { toast('Gagal memakai gambar. Coba gambar lain.', 'error'); }
+}
+function bindPrefs() {
+  const open = () => openPref();
+  $('btnAppearance').onclick = open; $('btnAppearanceA').onclick = open;
+  $('prefClose').onclick = closePref; $('prefDone').onclick = closePref;
+  $('prefModal').addEventListener('click', (e) => { if (e.target.id === 'prefModal') closePref(); });
+  $('prefFont').addEventListener('click', (e) => { const b = e.target.closest('[data-font]'); if (b) { prefs.font = b.dataset.font; savePrefs(); applyPrefs(); renderPrefUI(); } });
+  $('prefTheme').addEventListener('click', (e) => { const b = e.target.closest('[data-theme]'); if (b) { prefs.theme = b.dataset.theme; savePrefs(); applyPrefs(); renderPrefUI(); } });
+  $('prefWall').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-wall]'); if (!b) return;
+    if (b.dataset.wall === 'upload') { $('fileWall').click(); return; }
+    prefs.wall = b.dataset.wall; savePrefs(); applyPrefs(); renderPrefUI();
+  });
+  $('fileWall').onchange = (e) => { const f = e.target.files[0]; e.target.value = ''; setCustomWall(f); };
+  $('wallDel').onclick = () => { try { localStorage.removeItem(LS_WALL); } catch (e) {} if (prefs.wall === 'custom') prefs.wall = 'default'; savePrefs(); applyPrefs(); renderPrefUI(); };
+  $('prefReset').onclick = () => { try { localStorage.removeItem(LS_WALL); } catch (e) {} prefs.font = 'm'; prefs.theme = 'light'; prefs.wall = 'default'; savePrefs(); applyPrefs(); renderPrefUI(); };
+  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { if (prefs.theme === 'auto') applyPrefs(); });
 }
 
 /* ---------- Emotikon ---------- */
@@ -671,12 +752,13 @@ function bind() {
   $('lbClose').onclick = closeLb;
   $('lbDl').onclick = () => { const s = $('lbImg').getAttribute('src') || '', n = $('lbDl').dataset.name; if (s.indexOf('blob:') === 0) saveUrl(s, n); else doDownload('', s, n); };
   $('lightbox').addEventListener('click', (e) => { if (e.target.id !== 'lbImg' && !e.target.closest('#lbDl')) closeLb(); });
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeLb(); closeSettings(); toggleEmoji(false); } });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeLb(); closeSettings(); closePref(); toggleEmoji(false); } });
   $('btnRefresh').onclick = refreshChat;
   $('btnEmoji').addEventListener('pointerdown', (e) => e.preventDefault()); // fokus ketikan tidak hilang
   $('btnEmoji').onclick = (e) => { e.stopPropagation(); toggleEmoji(); };
   $('emojiPanel').addEventListener('pointerdown', (e) => e.preventDefault());
   $('emojiPanel').addEventListener('click', (e) => {
+    e.stopPropagation(); // tombol tab dirender ulang -> jangan dianggap klik di luar panel
     const c = e.target.closest('[data-cat]'); if (c) { emojiCat = c.dataset.cat; renderEmoji(); return; }
     const m = e.target.closest('[data-e]'); if (m) insertEmoji(m.dataset.e);
   });
@@ -687,7 +769,7 @@ function bind() {
 }
 
 (function init() {
-  bind(); initInstall(); initPush(); setMode('login');
+  loadPrefs(); applyPrefs(); bind(); bindPrefs(); initInstall(); initPush(); setMode('login');
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js', { scope: BASE_PATH }).catch(() => {});
   loadSettings();
   try { state.session = JSON.parse(localStorage.getItem(LS_SESSION) || 'null'); } catch (e) { state.session = null; }
