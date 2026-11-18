@@ -232,6 +232,7 @@ async function onAuthSubmit(e) {
 }
 function forceLogout(msg) {
   stopPolling();
+  try { finishCall('ended'); hideIncoming(false); } catch (e) {}
   localStorage.removeItem(LS_SESSION);
   state.session = null; state.peer = null; state.users = []; state.usersSig = ''; state.lastPushId = '';
   resetChat();
@@ -265,6 +266,7 @@ function enterApp() {
   startPolling();
   syncPush();
   checkNotifBanner();
+  handleDeepLink();
 }
 function layout() {
   const admin = isAdmin(), open = !admin || !!state.peer;
@@ -291,6 +293,7 @@ function setChatHeader() {
 /* ---------- Daftar user (admin) ---------- */
 async function loadUsers() {
   const r = await api('getUsers');
+  handleCallPoll(r.call);
   const sig = JSON.stringify(r.users);
   state.users = r.users;
   if (sig !== state.usersSig) { state.usersSig = sig; renderUsers(); }
@@ -335,8 +338,9 @@ const peerKey = () => (isAdmin() ? (state.peer && state.peer.user_id) : 'me');
 async function loadMessages(forceScroll) {
   const key = peerKey();
   const r = await api('getMessages', { peer_id: isAdmin() && state.peer ? state.peer.user_id : '' });
+  handleCallPoll(r.call);
   if (key !== peerKey()) return; // pengguna sudah pindah percakapan
-  const sig = r.messages.map((m) => m.msg_id + (m.is_read ? '1' : '0')).join(',');
+  const sig = r.messages.map((m) => m.msg_id + (m.is_read ? '1' : '0') + (m.file_type === 'call' ? m.file_name : '')).join(',');
   if (sig === state.sig) return;
   state.sig = sig;
   syncDom(r.messages, forceScroll);
@@ -352,6 +356,7 @@ function syncDom(msgs, forceScroll) {
   let added = false, lastMine = false;
   msgs.forEach((m) => {
     if (have.has(m.msg_id)) {
+      if (m.file_type === 'call') { const ce = box.querySelector('[data-id="' + m.msg_id + '"]'), h = bubble(m); if (ce && ce.dataset.ch !== h) { ce.dataset.ch = h; ce.innerHTML = h; } }
       const t = box.querySelector('[data-id="' + m.msg_id + '"] .tick');
       if (t) t.className = 'tick ' + (m.is_read ? 'text-[#53bdeb]' : 'text-gray-400');
       return;
@@ -381,11 +386,14 @@ function appendEl(m) {
   el.dataset.id = m.msg_id;
   if (m.pending) el.dataset.pending = '1';
   el.className = 'flex ' + (isMine(m) ? 'justify-end' : 'justify-start');
-  el.innerHTML = bubble(m);
+  const bh = bubble(m);
+  el.innerHTML = bh;
+  if (m.file_type === 'call') el.dataset.ch = bh;
   box.appendChild(el);
   hydrateDrive(el);
 }
 function bubble(m) {
+  if (m.file_type === 'call') return callBubble(m);
   const mine = isMine(m), name = esc(m.file_name), raw = String(m.file_url || '');
   const did = raw.indexOf('drive:') === 0 ? raw.slice(6) : '';
   const url = did ? '' : esc(safeUrl(raw));
@@ -621,6 +629,192 @@ async function refreshChat() {
   }
 }
 
+/* ---------- Panggilan suara & video (ZEGOCLOUD UIKit Prebuilt) ---------- */
+const CALL_RING_MS = 45000;
+const callState = { cur: null, incoming: null, handled: new Set(), deep: null };
+let ringCtx = null, ringTimer = null;
+const fmtDur = (s) => { s = Math.max(0, Math.round(s)); const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), x = s % 60; return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(x).padStart(2, '0'); };
+
+/* Nada dering (Web Audio API, tanpa file audio) */
+function unlockAudio() {
+  try { ringCtx = ringCtx || new (window.AudioContext || window.webkitAudioContext)(); if (ringCtx.state === 'suspended') ringCtx.resume(); } catch (e) {}
+}
+function ringOnce() {
+  if (!ringCtx) return;
+  const t = ringCtx.currentTime;
+  [440, 480].forEach((f) => {
+    const o = ringCtx.createOscillator(), g = ringCtx.createGain();
+    o.type = 'sine'; o.frequency.value = f; o.connect(g); g.connect(ringCtx.destination);
+    g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(0.12, t + 0.06); g.gain.setValueAtTime(0.12, t + 0.7); g.gain.linearRampToValueAtTime(0, t + 0.8);
+    o.start(t); o.stop(t + 0.85);
+  });
+  if (navigator.vibrate) navigator.vibrate([500, 200, 500]);
+}
+function startRing() { stopRing(); unlockAudio(); ringOnce(); ringTimer = setInterval(ringOnce, 2600); }
+function stopRing() { if (ringTimer) clearInterval(ringTimer); ringTimer = null; if (navigator.vibrate) navigator.vibrate(0); }
+
+/* Memulai panggilan keluar */
+async function startCall(kind) {
+  if (!state.session || (isAdmin() && !state.peer)) return;
+  if (callState.cur || callState.incoming) { toast('Selesaikan panggilan yang sedang berlangsung.', 'error'); return; }
+  if (!window.ZegoUIKitPrebuilt) { toast('Modul panggilan belum termuat. Periksa koneksi lalu muat ulang halaman.', 'error'); return; }
+  unlockAudio();
+  const btns = [$('btnCallAudio'), $('btnCallVideo')];
+  btns.forEach((b) => { b.disabled = true; });
+  try {
+    const r = await api('startCall', { kind, peer_id: isAdmin() ? state.peer.user_id : '' });
+    enterCall({ room: r.room_id, kind, token: r.token, appId: r.app_id, name: isAdmin() ? state.peer.username : state.settings.site_name, dir: 'out' });
+    state.sig = '';
+  } catch (e) { toast(e.message, 'error'); }
+  finally { btns.forEach((b) => { b.disabled = false; }); }
+}
+
+/* Masuk ke ruang panggilan aktif */
+function enterCall(c) {
+  const isVideo = c.kind === 'video';
+  const cur = callState.cur = { room: c.room, kind: c.kind, name: c.name, dir: c.dir, zp: null, closed: false, joined: false, watching: false, watch: null, ringTimeout: null };
+  $('callModal').classList.remove('hidden');
+  $('callWait').textContent = c.dir === 'out' ? 'Memanggil ' + c.name + '…' : 'Menyambungkan…';
+  $('callWait').classList.remove('hidden');
+  try {
+    const myName = isAdmin() ? state.settings.site_name : state.session.username;
+    const kit = ZegoUIKitPrebuilt.generateKitTokenForProduction(c.appId, c.token, c.room, state.session.user_id, myName);
+    const zp = ZegoUIKitPrebuilt.create(kit);
+    cur.zp = zp;
+    zp.joinRoom({
+      container: $('callRoot'),
+      scenario: { mode: ZegoUIKitPrebuilt.OneONoneCall },
+      turnOnCameraWhenJoining: isVideo,
+      turnOnMicrophoneWhenJoining: true,
+      showMyCameraToggleButton: isVideo,
+      showMyMicrophoneToggleButton: true,
+      showAudioVideoSettingsButton: false,
+      showScreenSharingButton: false,
+      showTextChat: false,
+      showUserList: false,
+      showPreJoinView: false,
+      showLayoutButton: false,
+      showLeavingView: false,
+      showRoomTimer: true,
+      onUserJoin: () => { cur.joined = true; $('callWait').classList.add('hidden'); },
+      onLeaveRoom: () => finishCall('ended'),
+      onUserLeave: () => finishCall('ended')
+    });
+  } catch (e) {
+    toast('Gagal memulai panggilan: ' + (e && e.message ? e.message : e), 'error');
+    finishCall('missed');
+    return;
+  }
+  if (c.dir === 'out') cur.ringTimeout = setTimeout(() => { if (!cur.joined && !cur.closed) { toast('Panggilan tidak dijawab.', 'error'); finishCall('missed'); } }, CALL_RING_MS);
+  cur.watch = setInterval(watchCall, 3000);
+}
+
+/* Pantau status di server (ditolak / diakhiri pihak lain) */
+async function watchCall() {
+  const cur = callState.cur;
+  if (!cur || cur.closed || cur.watching) return;
+  cur.watching = true;
+  try {
+    const r = await api('getCall', { room_id: cur.room });
+    if (cur.closed || !r.call) return;
+    const st = r.call.status;
+    if (st === 'answered') $('callWait').classList.add('hidden');
+    else if (st === 'rejected') { toast('Panggilan ditolak.', 'error'); finishCall('ended'); }
+    else if (st === 'missed' || st === 'ended') finishCall('ended');
+  } catch (e) { /* abaikan gangguan jaringan sesaat */ }
+  finally { cur.watching = false; }
+}
+
+/* Akhiri panggilan: matikan kamera/mikrofon, tutup layar, catat di server */
+function finishCall(status) {
+  const cur = callState.cur;
+  if (!cur || cur.closed) return;
+  cur.closed = true;
+  clearInterval(cur.watch); clearTimeout(cur.ringTimeout);
+  try { if (cur.zp) cur.zp.destroy(); } catch (e) {}
+  $('callRoot').innerHTML = '';
+  $('callModal').classList.add('hidden');
+  $('callWait').classList.add('hidden');
+  callState.cur = null;
+  api('endCall', { room_id: cur.room, status }).catch(() => {}).finally(() => { state.sig = ''; tick(); });
+}
+
+/* Layar panggilan masuk */
+function showIncoming(c) {
+  if (callState.cur || callState.incoming || callState.handled.has(c.room_id)) return;
+  callState.incoming = c;
+  if (isAdmin()) $('incAvatar').src = avatar(c.caller_name); else setLogo($('incAvatar'), state.settings.logo_url);
+  $('incName').textContent = c.caller_name;
+  $('incLabel').textContent = c.kind === 'video' ? 'Panggilan Video Masuk...' : 'Panggilan Suara Masuk...';
+  $('incomingCall').classList.remove('hidden'); $('incomingCall').classList.add('flex');
+  startRing();
+  c.timer = setTimeout(() => hideIncoming(true), CALL_RING_MS + 3000);
+}
+function hideIncoming(markHandled) {
+  const c = callState.incoming;
+  stopRing();
+  $('incomingCall').classList.add('hidden'); $('incomingCall').classList.remove('flex');
+  if (!c) return;
+  clearTimeout(c.timer);
+  if (markHandled) callState.handled.add(c.room_id);
+  callState.incoming = null;
+}
+async function acceptCall() {
+  const inc = callState.incoming;
+  if (!inc) return;
+  if (!window.ZegoUIKitPrebuilt) { toast('Modul panggilan belum termuat. Muat ulang halaman.', 'error'); return; }
+  $('incAccept').disabled = true;
+  try {
+    const r = await api('joinCall', { room_id: inc.room_id });
+    hideIncoming(true);
+    enterCall({ room: inc.room_id, kind: r.kind || inc.kind, token: r.token, appId: r.app_id, name: inc.caller_name, dir: 'in' });
+  } catch (e) { toast(e.message, 'error'); hideIncoming(true); }
+  finally { $('incAccept').disabled = false; }
+}
+function rejectCall() {
+  const inc = callState.incoming;
+  if (!inc) return;
+  hideIncoming(true);
+  api('endCall', { room_id: inc.room_id, status: 'rejected' }).catch(() => {}).finally(() => { state.sig = ''; tick(); });
+}
+/* Dipanggil dari hasil polling (getMessages / getUsers) */
+function handleCallPoll(c) {
+  if (c && c.room_id) showIncoming(c);
+  else if (callState.incoming) hideIncoming(true); // penelepon membatalkan / waktu habis
+}
+/* Dibuka dari ketukan notifikasi OneSignal: ?incoming_call=ROOM&call_type=video&caller_name=NAMA */
+function readDeepLink() {
+  const q = new URLSearchParams(location.search), room = q.get('incoming_call');
+  if (!room) return;
+  callState.deep = { room };
+  history.replaceState(null, '', location.pathname + location.hash);
+}
+async function handleDeepLink() {
+  const d = callState.deep;
+  if (!d || !state.session) return;
+  callState.deep = null;
+  try {
+    const c = (await api('getCall', { room_id: d.room })).call;
+    if (c && c.incoming && c.status === 'ringing' && c.fresh) showIncoming({ room_id: c.room_id, kind: c.kind, caller_id: c.caller_id, caller_name: c.caller_name });
+    else toast('Panggilan sudah berakhir.');
+  } catch (e) {}
+}
+/* Kartu riwayat panggilan di chat */
+function callBubble(m) {
+  const mine = isMine(m), p = String(m.file_name || '').split('|');
+  const video = p[0] === 'video', st = p[1] || 'ringing', dur = Number(p[3]) || 0;
+  let label, bad = false;
+  if (st === 'ended') label = dur > 0 ? 'Panggilan selesai · ' + fmtDur(dur) : 'Panggilan selesai';
+  else if (st === 'answered') label = Date.now() - Date.parse(m.timestamp) > 3 * 3600 * 1000 ? 'Panggilan selesai' : 'Sedang berlangsung';
+  else if (st === 'rejected') { label = 'Ditolak'; bad = true; }
+  else if (st === 'missed') { label = mine ? 'Tidak dijawab' : 'Tidak terjawab'; bad = true; }
+  else label = mine ? 'Memanggil…' : 'Panggilan masuk…';
+  return '<div class="flex flex-col max-w-[85%] md:max-w-[65%] min-w-[210px] px-2.5 py-1.5 shadow-sm text-wa-ink rounded-2xl ' + (mine ? 'bg-wa-bubble rounded-tr-none' : 'bg-white rounded-tl-none') + '">' +
+    '<div class="flex items-center gap-3 py-1"><span class="w-10 h-10 rounded-full flex items-center justify-center text-xl shrink-0 ' + (bad ? 'bg-red-100' : 'bg-black/10') + '">' + (video ? '📹' : '📞') + '</span>' +
+    '<div class="min-w-0"><div class="font-semibold msg-text leading-snug">' + (video ? 'Panggilan video' : 'Panggilan suara') + '</div><div class="text-sm ' + (bad ? 'text-red-600' : 'text-gray-500') + '">' + label + '</div></div></div>' +
+    '<div class="self-end text-[11px] text-gray-500 mt-0.5">' + timeStr(m.timestamp) + '</div></div>';
+}
+
 /* ---------- Polling ---------- */
 function startPolling() { stopPolling(); tick(); state.timer = setInterval(tick, POLL_MS); }
 function stopPolling() { if (state.timer) clearInterval(state.timer); state.timer = null; }
@@ -754,6 +948,11 @@ function bind() {
   $('lightbox').addEventListener('click', (e) => { if (e.target.id !== 'lbImg' && !e.target.closest('#lbDl')) closeLb(); });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeLb(); closeSettings(); closePref(); toggleEmoji(false); } });
   $('btnRefresh').onclick = refreshChat;
+  $('btnCallAudio').onclick = () => startCall('audio');
+  $('btnCallVideo').onclick = () => startCall('video');
+  $('incAccept').onclick = acceptCall;
+  $('incReject').onclick = rejectCall;
+  document.addEventListener('pointerdown', unlockAudio, { once: true }); // izin audio untuk nada dering
   $('btnEmoji').addEventListener('pointerdown', (e) => e.preventDefault()); // fokus ketikan tidak hilang
   $('btnEmoji').onclick = (e) => { e.stopPropagation(); toggleEmoji(); };
   $('emojiPanel').addEventListener('pointerdown', (e) => e.preventDefault());
@@ -769,6 +968,7 @@ function bind() {
 }
 
 (function init() {
+  readDeepLink();
   loadPrefs(); applyPrefs(); bind(); bindPrefs(); initInstall(); initPush(); setMode('login');
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js', { scope: BASE_PATH }).catch(() => {});
   loadSettings();
