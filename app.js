@@ -496,30 +496,40 @@ function autosize() {
 }
 
 /* ---------- Unggahan banyak file, besar, dengan progres ala WhatsApp ---------- */
-function apiX(action, payload, hooks) { // XMLHttpRequest agar progres unggah bisa dibaca
+function apiX(action, payload, hooks) { // fetch sederhana (text/plain) + dukungan batal & batas waktu
   hooks = hooks || {};
   return new Promise((resolve, reject) => {
     if (!state.session) return reject(new Error('Sesi berakhir.'));
     const body = Object.assign({ action }, payload, { user_id: state.session.user_id, session_token: state.session.session_token });
-    const x = new XMLHttpRequest();
-    const fail = (msg, extra) => reject(Object.assign(new Error(msg), extra));
-    x.open('POST', GAS_WEB_APP_URL);
-    x.setRequestHeader('Content-Type', 'text/plain;charset=utf-8');
-    x.timeout = 180000;
-    if (hooks.xhr) hooks.xhr(x);
-    if (hooks.progress) x.upload.onprogress = (e) => { if (e.lengthComputable) hooks.progress(e.loaded / e.total); };
-    x.onload = () => {
-      let d = null; try { d = JSON.parse(x.responseText); } catch (e) {}
-      if (!d) return fail('Respons server tidak valid.', { net: true });
-      if (!d.ok) { if (d.code === 'AUTH') forceLogout('Sesi berakhir. Silakan masuk kembali.'); return fail(d.error || 'Terjadi kesalahan.', { server: true }); }
-      resolve(d);
-    };
-    x.onerror = () => fail('Tidak dapat terhubung ke server. Periksa koneksi internet.', { net: true });
-    x.ontimeout = () => fail('Waktu habis. Periksa koneksi internet.', { net: true });
-    x.onabort = () => fail('Dibatalkan', { aborted: true });
-    x.send(JSON.stringify(body));
+    const ctrl = new AbortController();
+    let timedOut = false, userAbort = false;
+    const timer = setTimeout(() => { timedOut = true; ctrl.abort(); }, 180000);
+    if (hooks.xhr) hooks.xhr({ abort: () => { userAbort = true; ctrl.abort(); } });
+    const fail = (msg, extra) => { clearTimeout(timer); reject(Object.assign(new Error(msg), extra)); };
+    fetch(GAS_WEB_APP_URL, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(body), signal: ctrl.signal })
+      .then((res) => res.text())
+      .then((txt) => {
+        clearTimeout(timer);
+        let d = null; try { d = JSON.parse(txt); } catch (e) {}
+        if (!d) return fail('Respons server tidak valid.', { net: true });
+        if (!d.ok) { if (d.code === 'AUTH') forceLogout('Sesi berakhir. Silakan masuk kembali.'); return fail(d.error || 'Terjadi kesalahan.', { server: true }); }
+        resolve(d);
+      })
+      .catch((e) => {
+        if (userAbort) return fail('Dibatalkan', { aborted: true });
+        if (timedOut) return fail('Waktu habis. Periksa koneksi internet.', { net: true });
+        fail('Tidak dapat terhubung ke server. Periksa koneksi internet.', { net: true });
+      });
   });
 }
+/* fetch tidak punya progres unggah -> progres disimulasikan dari kecepatan unggah terukur */
+state.mpb = 0.0016; // perkiraan milidetik per byte (disesuaikan otomatis)
+function simProgress(up, base, span, expectedMs) {
+  const t0 = Date.now();
+  const id = setInterval(() => setProg(up, base + span * 0.95 * (1 - Math.exp(-2.2 * (Date.now() - t0) / expectedMs))), 150);
+  return () => clearInterval(id);
+}
+function learnSpeed(bytes, ms) { if (bytes > 65536) state.mpb = 0.5 * state.mpb + 0.5 * Math.min(0.02, Math.max(0.0002, ms / bytes)); }
 const abortErr = () => Object.assign(new Error('Dibatalkan'), { aborted: true });
 
 function queueUpload(it, text, peer_id, key) {
@@ -568,11 +578,12 @@ async function uploadInline(up) {
   const f = up.it.file;
   const data = await toBase64(f);
   if (up.cancelled) throw abortErr();
-  const r = await apiX('sendMessage', { text: up.text, peer_id: up.peer_id, file: { name: f.name, mime: f.type || 'application/octet-stream', data } }, {
-    xhr: (x) => { up.xhr = x; },
-    progress: (p) => { if (p >= 1) up.phase = 'finish'; setProg(up, p * f.size * 0.98, p >= 1); }
-  });
-  return r.message;
+  const t0 = Date.now(), stop = simProgress(up, 0, f.size, f.size * state.mpb + 1500);
+  try {
+    const r = await apiX('sendMessage', { text: up.text, peer_id: up.peer_id, file: { name: f.name, mime: f.type || 'application/octet-stream', data } }, { xhr: (x) => { up.xhr = x; } });
+    learnSpeed(f.size, Date.now() - t0);
+    return r.message;
+  } finally { stop(); }
 }
 async function uploadChunked(up) {
   const f = up.it.file, size = f.size;
@@ -588,10 +599,14 @@ async function uploadChunked(up) {
     const data = await toBase64(f.slice(off, end));
     let r, tries = 0;
     for (;;) {
+      const t0 = Date.now(), stop = simProgress(up, off, end - off, (end - off) * state.mpb + 800);
       try {
-        r = await apiX('uploadChunk', { upload_id: up.upload_id, offset: off, data }, { xhr: (x) => { up.xhr = x; }, progress: (p) => setProg(up, off + p * (end - off) * 0.95) });
+        r = await apiX('uploadChunk', { upload_id: up.upload_id, offset: off, data }, { xhr: (x) => { up.xhr = x; } });
+        learnSpeed(end - off, Date.now() - t0);
+        stop();
         break;
       } catch (e) {
+        stop();
         if (up.cancelled || e.aborted || !e.net || ++tries >= 3) { if (/Sesi unggah/.test(e.message)) { up.upload_id = null; up.offset = 0; } throw e; }
         await sleep(1200 * tries);
       }
