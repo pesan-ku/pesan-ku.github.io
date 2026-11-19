@@ -1,12 +1,17 @@
 /* Service Worker: push OneSignal + cache offline untuk app shell */
 importScripts('https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.sw.js');
 
-const CACHE = 'lsc-v9'; // naikkan versi (lsc-v2, ...) setiap kali Anda mengubah file frontend
+const CACHE = 'lsc-v10'; // naikkan versi setiap kali Anda mengubah file frontend
 const SHELL = ['./', 'index.html', 'app.js', 'manifest.json', 'icon-192.png', 'icon-512.png'];
 const SKIP = ['script.google.com', 'script.googleusercontent.com', 'drive.google.com', 'googleusercontent.com', 'onesignal.com', 'unpkg.com', 'zegocloud.com', 'zego.im'];
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  // 'reload' = abaikan cache HTTP browser (GitHub Pages menyimpan file ~10 menit) agar file terbaru yang dipasang
+  e.waitUntil(
+    caches.open(CACHE)
+      .then((c) => Promise.all(SHELL.map((u) => fetch(new Request(u, { cache: 'reload' })).then((r) => (r.ok ? c.put(u, r) : null)).catch(() => null))))
+      .then(() => self.skipWaiting())
+  );
 });
 
 self.addEventListener('activate', (e) => {
@@ -26,7 +31,17 @@ self.addEventListener('fetch', (e) => {
       .catch(() => caches.match('index.html')));
     return;
   }
-  // stale-while-revalidate untuk aset statis & Tailwind CDN
+  // file milik sendiri (app.js, manifest, ikon): utamakan versi terbaru dari jaringan, cache hanya untuk offline
+  if (url.origin === location.origin) {
+    e.respondWith(
+      fetch(req, { cache: 'no-cache' }).then((r) => {
+        if (r && r.ok) { const cp = r.clone(); caches.open(CACHE).then((c) => c.put(req, cp)); }
+        return r;
+      }).catch(() => caches.match(req))
+    );
+    return;
+  }
+  // pustaka pihak ketiga (mis. Tailwind CDN): stale-while-revalidate
   e.respondWith(
     caches.match(req).then((hit) => {
       const net = fetch(req).then((r) => {
