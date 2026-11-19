@@ -10,6 +10,8 @@ const MAX_FILE = 100 * 1024 * 1024;   // batas per file
 const MAX_INLINE = 10 * 1024 * 1024;  // batas kirim sekali jalan (cadangan bila unggah per potongan gagal dimulai)
 const SMALL_MAX = 3 * 1024 * 1024;    // file sekecil ini dikirim dalam 1 permintaan
 const CHUNK = 3 * 1024 * 1024;        // ukuran potongan unggah (kelipatan 256 KB)
+const APP_VERSION = '2026-11-19.r4';
+const MIN_CHUNK = 512 * 1024;
 const MAX_FILES = 10;                 // jumlah file per pengiriman
 const DL_CHUNK = 5 * 1024 * 1024;     // ukuran potongan unduh
 const LS_SESSION = 'lsc_session';
@@ -522,6 +524,24 @@ function apiX(action, payload, hooks) { // fetch sederhana (text/plain) + dukung
       });
   });
 }
+/* Cari tahu penyebab gagal: server tidak terjangkau, POST ditolak, atau kiriman terlalu besar */
+async function diagnoseNet() {
+  let get = false, post = false;
+  try {
+    const c = new AbortController(), t = setTimeout(() => c.abort(), 10000);
+    const r = await fetch(GAS_WEB_APP_URL, { signal: c.signal });
+    clearTimeout(t);
+    const j = await r.json(); get = !!(j && j.ok);
+  } catch (e) {}
+  if (get) { try { await apiX('getSettings', {}); post = true; } catch (e) { post = false; } }
+  const msg = !get
+    ? 'Server Apps Script tidak dapat dibuka dari perangkat ini. Periksa VPN, antivirus, atau pemblokir iklan, atau coba jaringan lain.'
+    : !post
+      ? 'Server dapat dibuka, tetapi permintaan kirim data ditolak. Periksa Deploy Apps Script (Execute as: Me, akses: Anyone, dan deploy sebagai VERSI BARU), lalu jalankan setupDatabase dari editor dan setujui izin baru.'
+      : 'Server menolak kiriman data ini (kemungkinan terlalu besar untuk koneksi atau Apps Script). Coba file yang lebih kecil.';
+  return { get, post, msg };
+}
+state.chunk = CHUNK; state.noInline = false;
 /* fetch tidak punya progres unggah -> progres disimulasikan dari kecepatan unggah terukur */
 state.mpb = 0.0016; // perkiraan milidetik per byte (disesuaikan otomatis)
 function simProgress(up, base, span, expectedMs) {
@@ -554,10 +574,17 @@ async function doUpload(up) {
   up.status = 'uploading'; up.phase = ''; up.loaded = up.offset || 0; paintUpload(up);
   try {
     let sent;
-    if (f.size <= SMALL_MAX) sent = await uploadInline(up);
-    else {
+    if (f.size <= SMALL_MAX && !state.noInline) {
+      try { sent = await uploadInline(up); }
+      catch (e) {
+        if (up.cancelled || e.aborted || !e.net) throw e;
+        const d = await diagnoseNet(); // gagal jaringan: kirim sekali jalan ditolak?
+        if (d.post && f.size > 600 * 1024) { state.noInline = true; sent = await uploadChunked(up); }
+        else { e.message = d.msg; throw e; }
+      }
+    } else {
       try { sent = await uploadChunked(up); }
-      catch (e) { if (e.initFailed && f.size <= MAX_INLINE && !up.cancelled) sent = await uploadInline(up); else throw e; }
+      catch (e) { if (e.initFailed && f.size <= MAX_INLINE && !state.noInline && !up.cancelled) sent = await uploadInline(up); else throw e; }
     }
     finishUpload(up, sent);
   } catch (e) {
@@ -591,13 +618,17 @@ async function uploadChunked(up) {
     try {
       const init = await apiX('uploadInit', { name: f.name, mime: f.type || 'application/octet-stream', size }, { xhr: (x) => { up.xhr = x; } });
       up.upload_id = init.upload_id; up.offset = 0;
-    } catch (e) { e.initFailed = true; throw e; }
+    } catch (e) {
+      e.initFailed = true;
+      if (e.net && !up.cancelled && !e.aborted) e.message = (await diagnoseNet()).msg;
+      throw e;
+    }
   }
   while (up.offset < size) {
     if (up.cancelled) throw abortErr();
-    const off = up.offset, end = Math.min(off + CHUNK, size);
+    const off = up.offset, end = Math.min(off + state.chunk, size);
     const data = await toBase64(f.slice(off, end));
-    let r, tries = 0;
+    let r = null, tries = 0, shrink = false;
     for (;;) {
       const t0 = Date.now(), stop = simProgress(up, off, end - off, (end - off) * state.mpb + 800);
       try {
@@ -607,10 +638,18 @@ async function uploadChunked(up) {
         break;
       } catch (e) {
         stop();
-        if (up.cancelled || e.aborted || !e.net || ++tries >= 3) { if (/Sesi unggah/.test(e.message)) { up.upload_id = null; up.offset = 0; } throw e; }
-        await sleep(1200 * tries);
+        if (up.cancelled || e.aborted) throw e;
+        if (/Sesi unggah/.test(e.message)) { up.upload_id = null; up.offset = 0; throw e; }
+        if (!e.net) throw e;
+        if (++tries >= 2) { // gagal berulang: cari penyebabnya
+          const d = await diagnoseNet();
+          if (d.post && state.chunk > MIN_CHUNK) { shrink = true; break; } // server hidup -> kemungkinan potongan terlalu besar
+          e.message = d.msg; throw e;
+        }
+        await sleep(1000 * tries);
       }
     }
+    if (shrink) { state.chunk = Math.max(MIN_CHUNK, Math.floor(state.chunk / 2 / 262144) * 262144); continue; }
     up.offset = r.done ? size : Math.min(size, Math.max(off, r.next || end));
     setProg(up, up.offset, true);
   }
@@ -1219,6 +1258,7 @@ function bind() {
 
 (function init() {
   readDeepLink();
+  if ($('appVer')) $('appVer').textContent = 'Versi aplikasi ' + APP_VERSION;
   loadPrefs(); applyPrefs(); bind(); bindPrefs(); initInstall(); initPush(); setMode('login');
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js', { scope: BASE_PATH }).catch(() => {});
   loadSettings();
