@@ -6,7 +6,12 @@ const ONESIGNAL_APP_ID = '5bfaa819-83a3-47e7-9f0f-4f7c9467af1c';
 /* ===================================================== */
 
 const POLL_MS = 4000;
-const MAX_FILE = 10 * 1024 * 1024;
+const MAX_FILE = 100 * 1024 * 1024;   // batas per file
+const MAX_INLINE = 10 * 1024 * 1024;  // batas kirim sekali jalan (cadangan bila unggah per potongan gagal dimulai)
+const SMALL_MAX = 3 * 1024 * 1024;    // file sekecil ini dikirim dalam 1 permintaan
+const CHUNK = 3 * 1024 * 1024;        // ukuran potongan unggah (kelipatan 256 KB)
+const MAX_FILES = 10;                 // jumlah file per pengiriman
+const DL_CHUNK = 5 * 1024 * 1024;     // ukuran potongan unduh
 const LS_SESSION = 'lsc_session';
 const LS_SETTINGS = 'lsc_settings';
 const BASE_PATH = location.pathname.replace(/[^/]*$/, '');
@@ -18,7 +23,7 @@ const IMG_EXT = /\.(jpe?g|png|gif|webp|bmp|heic|avif)$/i, VID_EXT = /\.(mp4|webm
 
 /* File di Drive yang tidak bisa dibagikan publik (file_url = "drive:ID") diambil lewat backend */
 const driveCache = new Map(), driveMime = new Map();
-function fetchDriveBlob(id) {
+function fetchDriveBlob(id, onProg) {
   if (!driveCache.has(id)) {
     const p = (async () => {
       // 1) cek cache permanen di perangkat -> pembukaan ulang instan
@@ -30,12 +35,20 @@ function fetchDriveBlob(id) {
         if (hit) { const b = await hit.blob(); driveMime.set(id, b.type); return URL.createObjectURL(b); }
       } catch (e) { c = null; }
       // 2) belum ada -> ambil dari server lalu simpan ke cache
-      const r = await api('getFile', { file_id: id });
-      const bin = atob(r.data), arr = new Uint8Array(bin.length);
-      for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
-      const mime = r.mime || 'application/octet-stream', blob = new Blob([arr], { type: mime });
+      const parts = [];
+      let off = 0, size = 0, mime = 'application/octet-stream';
+      do {
+        const r = await api('getFile', { file_id: id, offset: off, length: DL_CHUNK });
+        size = r.size || 0; mime = r.mime || mime;
+        const bin = atob(r.data), arr = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+        parts.push(arr); off += arr.length;
+        if (onProg) onProg(off, size);
+        if (!arr.length) break;
+      } while (off < size);
+      const blob = new Blob(parts, { type: mime });
       driveMime.set(id, mime);
-      if (c) c.put(key, new Response(blob, { headers: { 'Content-Type': mime } })).catch(() => {});
+      if (c && blob.size < 30 * 1024 * 1024) c.put(key, new Response(blob, { headers: { 'Content-Type': mime } })).catch(() => {});
       return URL.createObjectURL(blob);
     })();
     p.catch(() => driveCache.delete(id));
@@ -73,7 +86,21 @@ function saveUrl(u, name) {
   const a = document.createElement('a');
   a.href = u; a.download = name || 'file'; document.body.appendChild(a); a.click(); a.remove();
 }
-async function downloadDrive(id, name) { saveUrl(await fetchDriveBlob(id), name); }
+function dlProgress(name) {
+  let el = null;
+  return {
+    cb: (o, s) => {
+      if (s <= DL_CHUNK) return;
+      if (!el) { el = document.createElement('div'); el.className = 'toast pointer-events-auto text-sm text-white rounded-xl px-4 py-3 shadow-lg bg-gray-900'; $('toasts').appendChild(el); }
+      el.textContent = 'Mengunduh ' + name + ' ' + Math.round(o / s * 100) + '%';
+    },
+    done: () => { if (el) el.remove(); }
+  };
+}
+async function downloadDrive(id, name) {
+  const pg = dlProgress(name);
+  try { saveUrl(await fetchDriveBlob(id, pg.cb), name); } finally { pg.done(); }
+}
 async function doDownload(did, url, name) {
   if (did) return downloadDrive(did, name);
   try {
@@ -99,7 +126,9 @@ async function fileAction(btn) {
       if (w) w.location.href = target; else toast('Izinkan pop-up untuk melihat file.', 'error');
       return;
     }
-    const u = await fetchDriveBlob(did), mime = driveMime.get(did) || '';
+    const pg = dlProgress(name);
+    let u; try { u = await fetchDriveBlob(did, pg.cb); } finally { pg.done(); }
+    const mime = driveMime.get(did) || '';
     if (!/^(image|video|audio|text)\/|application\/pdf/.test(mime)) { if (w) w.close(); return saveUrl(u, name); }
     if (w) w.location.href = u; else toast('Izinkan pop-up untuk melihat file.', 'error');
   } catch (e) { if (w) w.close(); throw e; }
@@ -233,6 +262,8 @@ async function onAuthSubmit(e) {
 function forceLogout(msg) {
   stopPolling();
   try { finishCall('ended'); hideIncoming(false); } catch (e) {}
+  state.uploads.forEach((u) => { u.cancelled = true; try { if (u.xhr) u.xhr.abort(); } catch (e) {} });
+  state.uploads = [];
   localStorage.removeItem(LS_SESSION);
   state.session = null; state.peer = null; state.users = []; state.usersSig = ''; state.lastPushId = '';
   resetChat();
@@ -330,9 +361,11 @@ function closeChat() {
 /* ---------- Pesan ---------- */
 function resetChat() {
   if ($('emojiPanel')) toggleEmoji(false);
-  state.msgs = []; state.sig = ''; state.lastDay = ''; state.pending = [];
+  state.msgs = []; state.sig = ''; state.lastDay = '';
+  state.pending = state.uploads.filter((u) => u.key === peerKey()).map((u) => u.msg);
   $('msgs').innerHTML = '';
   clearAttach();
+  if (state.session) state.pending.forEach(appendEl);
 }
 const peerKey = () => (isAdmin() ? (state.peer && state.peer.user_id) : 'me');
 async function loadMessages(forceScroll) {
@@ -389,10 +422,12 @@ function appendEl(m) {
   const bh = bubble(m);
   el.innerHTML = bh;
   if (m.file_type === 'call') el.dataset.ch = bh;
+  if (m.up) el.dataset.ust = upSig(m.up);
   box.appendChild(el);
   hydrateDrive(el);
 }
 function bubble(m) {
+  if (m.up) return uploadBubble(m);
   if (m.file_type === 'call') return callBubble(m);
   const mine = isMine(m), name = esc(m.file_name), raw = String(m.file_url || '');
   const did = raw.indexOf('drive:') === 0 ? raw.slice(6) : '';
@@ -402,7 +437,7 @@ function bubble(m) {
   m = Object.assign({}, m, { file_type: kind });
   let media = '';
   if (did && kind === 'image') media = '<img data-drive="' + esc(did) + '" alt="' + name + '" class="animate-pulse bg-black/10 rounded-lg min-w-[160px] min-h-[120px] max-h-64 max-w-full object-cover cursor-pointer mb-1">';
-  else if (did && kind === 'video') media = '<video controls preload="metadata" playsinline data-drive="' + esc(did) + '" class="rounded-lg w-full max-w-[280px] min-h-[120px] mb-1 bg-black"></video>';
+  else if (did && kind === 'video') media = '<div class="flex items-center gap-3 bg-black/10 rounded-lg p-3 mb-1 min-w-[200px]"><span class="text-2xl">🎥</span><span class="truncate flex-1 text-sm font-medium">' + name + '</span></div>';
   else if (did) media = '<div class="flex items-center gap-3 bg-black/10 rounded-lg p-3 mb-1 min-w-[200px]"><span class="text-2xl">📄</span><span class="truncate flex-1 text-sm font-medium">' + name + '</span></div>';
   else if (m.file_type === 'image' && url) media = '<img src="' + url + '" alt="' + name + '" loading="lazy" data-lightbox="' + url + '" class="rounded-lg max-h-64 max-w-full object-cover cursor-pointer mb-1">';
   else if (m.file_type === 'video' && url) media = '<video controls preload="metadata" playsinline class="rounded-lg w-full max-w-[280px] mb-1 bg-black"><source src="' + url + '"></video>';
@@ -420,40 +455,38 @@ function bubble(m) {
 }
 
 /* ---------- Kirim ---------- */
+state.files = []; state.uploads = [];
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const kindOf = (f) => (f.type.startsWith('image/') ? 'image' : f.type.startsWith('video/') ? 'video' : 'document');
+
 async function send() {
-  const text = $('msgInput').value.trim(), file = state.file;
-  if (!text && !file) return;
+  const text = $('msgInput').value.trim(), files = state.files.slice();
+  if (!text && !files.length) return;
   if (isAdmin() && !state.peer) return;
-  if (state.busy) { toast('Tunggu, gambar sedang diproses.'); return; }
-  const kind = !file ? 'text' : file.type.startsWith('image/') ? 'image' : file.type.startsWith('video/') ? 'video' : 'document';
-  const tmp = { msg_id: 'tmp' + Date.now() + Math.random().toString(36).slice(2, 6), sender_id: isAdmin() ? 'admin' : state.session.user_id, text, file_type: kind, file_name: file ? file.name : '', file_url: file && kind === 'image' ? URL.createObjectURL(file) : '', timestamp: Date.now(), is_read: false, pending: true };
-  const key = peerKey();
+  if (files.some((f) => f.processing)) { toast('Tunggu, gambar sedang diproses.'); return; }
+  const peer_id = isAdmin() ? state.peer.user_id : '', key = peerKey();
+  $('msgInput').value = ''; autosize(); clearAttach(true);
+  toggleEmoji(false);
+  if (!files.length) return sendText(text, peer_id, key);
+  files.forEach((it, i) => queueUpload(it, i === 0 ? text : '', peer_id, key)); // teks menjadi keterangan file pertama
+  runUploads();
+}
+async function sendText(text, peer_id, key) {
+  const tmp = { msg_id: 'tmp' + Date.now() + Math.random().toString(36).slice(2, 6), sender_id: isAdmin() ? 'admin' : state.session.user_id, text, file_type: 'text', file_name: '', file_url: '', timestamp: Date.now(), is_read: false, pending: true };
   let sent = null;
   state.pending.push(tmp);
   appendEl(tmp); scrollBottom();
-  $('msgInput').value = ''; autosize(); clearAttach();
-  toggleEmoji(false);
   try {
-    const payload = { text, peer_id: isAdmin() ? state.peer.user_id : '' };
-    if (file) payload.file = { name: file.name, mime: file.type || 'application/octet-stream', data: await toBase64(file) };
-    const r = await api('sendMessage', payload);
-    sent = r.message;
+    sent = (await api('sendMessage', { text, peer_id })).message;
   } catch (e) {
-    toast(file ? 'Upload gagal: ' + e.message : 'Pesan gagal terkirim: ' + e.message, 'error');
-    if (text && !$('msgInput').value) { $('msgInput').value = text; autosize(); }
+    toast('Pesan gagal terkirim: ' + e.message, 'error');
+    if (!$('msgInput').value) { $('msgInput').value = text; autosize(); }
   } finally {
     state.pending = state.pending.filter((p) => p !== tmp);
     const el = $('msgs').querySelector('[data-id="' + tmp.msg_id + '"]'); if (el) el.remove();
-    if (tmp.file_url) setTimeout(() => URL.revokeObjectURL(tmp.file_url), 3000);
     if (key === peerKey()) {
-      if (sent) {
-        // pengirim memakai salinan lokal -> tidak perlu mengunduh ulang filenya
-        if (file && /^drive:/.test(sent.file_url)) {
-          const id = sent.file_url.slice(6);
-          driveCache.set(id, Promise.resolve(URL.createObjectURL(file))); driveMime.set(id, file.type || '');
-        }
-        if (!$('msgs').querySelector('[data-id="' + sent.msg_id + '"]')) { state.msgs.push(sent); appendEl(sent); scrollBottom(); }
-      } else { try { state.sig = ''; await loadMessages(true); } catch (e) {} }
+      if (sent) { if (!$('msgs').querySelector('[data-id="' + sent.msg_id + '"]')) { state.msgs.push(sent); appendEl(sent); scrollBottom(); } }
+      else { try { state.sig = ''; await loadMessages(true); } catch (e) {} }
     }
   }
 }
@@ -462,33 +495,227 @@ function autosize() {
   t.style.height = Math.min(t.scrollHeight, 112) + 'px';
 }
 
-/* ---------- Lampiran ---------- */
-async function pickFile(f0) {
-  if (!f0) return;
-  const isImg = f0.type.startsWith('image/');
-  if (isImg ? f0.size > IMG_IN_MAX : f0.size > MAX_FILE) { toast('Ukuran file terlalu besar (maks. ' + (isImg ? '30' : '10') + ' MB).', 'error'); return; }
-  let f = f0;
-  if (isImg) {
-    const my = state.pickId = (state.pickId || 0) + 1;
-    state.busy = true;
-    $('attachName').textContent = f0.name; $('attachSize').textContent = 'Mengompres gambar…';
-    $('attachThumb').innerHTML = '<span class="spin"></span>';
-    $('attachBar').classList.remove('hidden');
-    f = await compressImage(f0);
-    if (my !== state.pickId) return; // dibatalkan saat proses
-    state.busy = false;
-  }
-  if (f.size > MAX_FILE) { toast('Ukuran file maksimal 10 MB.', 'error'); clearAttach(); return; }
-  state.file = f;
-  $('attachName').textContent = f.name; $('attachSize').textContent = fmtSize(f.size);
-  const th = $('attachThumb');
-  th.innerHTML = f.type.startsWith('image/') ? '<img class="w-full h-full object-cover" src="' + URL.createObjectURL(f) + '" alt="">' : (f.type.startsWith('video/') ? '🎥' : '📄');
-  $('attachBar').classList.remove('hidden');
+/* ---------- Unggahan banyak file, besar, dengan progres ala WhatsApp ---------- */
+function apiX(action, payload, hooks) { // XMLHttpRequest agar progres unggah bisa dibaca
+  hooks = hooks || {};
+  return new Promise((resolve, reject) => {
+    if (!state.session) return reject(new Error('Sesi berakhir.'));
+    const body = Object.assign({ action }, payload, { user_id: state.session.user_id, session_token: state.session.session_token });
+    const x = new XMLHttpRequest();
+    const fail = (msg, extra) => reject(Object.assign(new Error(msg), extra));
+    x.open('POST', GAS_WEB_APP_URL);
+    x.setRequestHeader('Content-Type', 'text/plain;charset=utf-8');
+    x.timeout = 180000;
+    if (hooks.xhr) hooks.xhr(x);
+    if (hooks.progress) x.upload.onprogress = (e) => { if (e.lengthComputable) hooks.progress(e.loaded / e.total); };
+    x.onload = () => {
+      let d = null; try { d = JSON.parse(x.responseText); } catch (e) {}
+      if (!d) return fail('Respons server tidak valid.', { net: true });
+      if (!d.ok) { if (d.code === 'AUTH') forceLogout('Sesi berakhir. Silakan masuk kembali.'); return fail(d.error || 'Terjadi kesalahan.', { server: true }); }
+      resolve(d);
+    };
+    x.onerror = () => fail('Tidak dapat terhubung ke server. Periksa koneksi internet.', { net: true });
+    x.ontimeout = () => fail('Waktu habis. Periksa koneksi internet.', { net: true });
+    x.onabort = () => fail('Dibatalkan', { aborted: true });
+    x.send(JSON.stringify(body));
+  });
 }
-function clearAttach() {
-  state.pickId = (state.pickId || 0) + 1; state.busy = false;
-  state.file = null; $('fileMedia').value = ''; $('fileDoc').value = '';
-  $('attachBar').classList.add('hidden'); $('attachThumb').innerHTML = '';
+const abortErr = () => Object.assign(new Error('Dibatalkan'), { aborted: true });
+
+function queueUpload(it, text, peer_id, key) {
+  const msg = { msg_id: 'tmp' + Date.now() + Math.random().toString(36).slice(2, 6), sender_id: isAdmin() ? 'admin' : state.session.user_id, text, file_type: it.kind, file_name: it.file.name, file_url: '', timestamp: Date.now(), is_read: false, pending: true };
+  const up = { id: msg.msg_id, it, text, peer_id, key, status: 'queued', phase: '', loaded: 0, total: it.file.size, offset: 0, upload_id: null, xhr: null, cancelled: false, msg };
+  msg.up = up;
+  state.uploads.push(up);
+  if (key === peerKey()) { state.pending.push(msg); appendEl(msg); scrollBottom(); }
+}
+async function runUploads() {
+  if (uploadRunning) return;
+  uploadRunning = true;
+  try {
+    let up;
+    while ((up = state.uploads.find((u) => u.status === 'queued'))) await doUpload(up);
+  } finally { uploadRunning = false; }
+}
+let uploadRunning = false;
+
+async function doUpload(up) {
+  const f = up.it.file;
+  up.status = 'uploading'; up.phase = ''; up.loaded = up.offset || 0; paintUpload(up);
+  try {
+    let sent;
+    if (f.size <= SMALL_MAX) sent = await uploadInline(up);
+    else {
+      try { sent = await uploadChunked(up); }
+      catch (e) { if (e.initFailed && f.size <= MAX_INLINE && !up.cancelled) sent = await uploadInline(up); else throw e; }
+    }
+    finishUpload(up, sent);
+  } catch (e) {
+    if (up.cancelled || e.aborted) return;
+    if (/Unggahan tidak ditemukan/.test(e.message)) { // kemungkinan pesan sudah terkirim sebelumnya
+      dropUpload(up); toast('Memeriksa pesan terkirim…'); state.sig = ''; tick(); return;
+    }
+    up.status = 'failed'; up.error = e.message; paintUpload(up);
+    toast('Gagal mengirim ' + f.name + ': ' + e.message, 'error');
+  }
+}
+function setProg(up, loaded, force) {
+  up.loaded = Math.max(0, Math.min(up.total, loaded));
+  const now = Date.now();
+  if (force || now - (up.lp || 0) > 120) { up.lp = now; paintUpload(up); }
+}
+async function uploadInline(up) {
+  const f = up.it.file;
+  const data = await toBase64(f);
+  if (up.cancelled) throw abortErr();
+  const r = await apiX('sendMessage', { text: up.text, peer_id: up.peer_id, file: { name: f.name, mime: f.type || 'application/octet-stream', data } }, {
+    xhr: (x) => { up.xhr = x; },
+    progress: (p) => { if (p >= 1) up.phase = 'finish'; setProg(up, p * f.size * 0.98, p >= 1); }
+  });
+  return r.message;
+}
+async function uploadChunked(up) {
+  const f = up.it.file, size = f.size;
+  if (!up.upload_id) {
+    try {
+      const init = await apiX('uploadInit', { name: f.name, mime: f.type || 'application/octet-stream', size }, { xhr: (x) => { up.xhr = x; } });
+      up.upload_id = init.upload_id; up.offset = 0;
+    } catch (e) { e.initFailed = true; throw e; }
+  }
+  while (up.offset < size) {
+    if (up.cancelled) throw abortErr();
+    const off = up.offset, end = Math.min(off + CHUNK, size);
+    const data = await toBase64(f.slice(off, end));
+    let r, tries = 0;
+    for (;;) {
+      try {
+        r = await apiX('uploadChunk', { upload_id: up.upload_id, offset: off, data }, { xhr: (x) => { up.xhr = x; }, progress: (p) => setProg(up, off + p * (end - off) * 0.95) });
+        break;
+      } catch (e) {
+        if (up.cancelled || e.aborted || !e.net || ++tries >= 3) { if (/Sesi unggah/.test(e.message)) { up.upload_id = null; up.offset = 0; } throw e; }
+        await sleep(1200 * tries);
+      }
+    }
+    up.offset = r.done ? size : Math.min(size, Math.max(off, r.next || end));
+    setProg(up, up.offset, true);
+  }
+  up.phase = 'finish'; paintUpload(up);
+  const r = await apiX('sendMessage', { text: up.text, peer_id: up.peer_id, upload_id: up.upload_id }, { xhr: (x) => { up.xhr = x; } });
+  return r.message;
+}
+function finishUpload(up, sent) {
+  up.status = 'done';
+  const f = up.it.file;
+  dropUpload(up);
+  if (up.key !== peerKey()) return; // sedang membuka percakapan lain; pesan muncul lewat polling
+  if (/^drive:/.test(sent.file_url)) { // pengirim memakai salinan lokal -> tidak perlu mengunduh ulang
+    const id = sent.file_url.slice(6);
+    driveCache.set(id, Promise.resolve(URL.createObjectURL(f))); driveMime.set(id, f.type || '');
+  }
+  if (!$('msgs').querySelector('[data-id="' + sent.msg_id + '"]')) { state.msgs.push(sent); appendEl(sent); scrollBottom(); }
+}
+function dropUpload(up) {
+  state.uploads = state.uploads.filter((u) => u !== up);
+  state.pending = state.pending.filter((p) => p !== up.msg);
+  const el = $('msgs').querySelector('[data-id="' + up.id + '"]'); if (el) el.remove();
+  if (up.it.thumb) { const t = up.it.thumb; setTimeout(() => URL.revokeObjectURL(t), 3000); }
+}
+function upAction(act, id) {
+  const up = state.uploads.find((u) => u.id === id);
+  if (!up) return;
+  if (act === 'retry') {
+    if (up.status !== 'failed') return;
+    up.status = 'queued'; up.error = ''; up.loaded = up.offset || 0; paintUpload(up); runUploads();
+    return;
+  }
+  up.cancelled = true;
+  try { if (up.xhr) up.xhr.abort(); } catch (e) {}
+  dropUpload(up);
+}
+
+/* Tampilan gelembung unggahan: cincin progres + tombol batal / coba lagi */
+const RING_C = 125.66;
+const upIndet = (up) => up.status === 'queued' || (up.status === 'uploading' && (up.phase === 'finish' || up.loaded >= up.total));
+const upSig = (up) => up.status + (upIndet(up) ? 'i' : 'd');
+const upFrac = (up) => (upIndet(up) ? 0.28 : Math.min(1, up.loaded / (up.total || 1)));
+function upLabel(up, long) {
+  if (up.status === 'queued') return 'Menunggu…';
+  if (up.status === 'failed') return 'Gagal terkirim';
+  if (upIndet(up)) return 'Menyelesaikan…';
+  const pct = Math.round(upFrac(up) * 100) + '%';
+  return long ? fmtSize(up.loaded) + ' / ' + fmtSize(up.total) + ' · ' + pct : pct;
+}
+function ringHtml(up) {
+  const failed = up.status === 'failed', indet = upIndet(up);
+  const off = failed ? 0 : (RING_C * (1 - upFrac(up))).toFixed(1);
+  const svg = '<svg class="w-full h-full -rotate-90" viewBox="0 0 48 48"><circle cx="24" cy="24" r="20" fill="none" stroke="rgba(255,255,255,.3)" stroke-width="3"/>' +
+    '<circle data-up-arc cx="24" cy="24" r="20" fill="none" stroke="' + (failed ? '#f87171' : '#fff') + '" stroke-width="3" stroke-linecap="round" stroke-dasharray="' + RING_C + '" stroke-dashoffset="' + off + '"/></svg>';
+  const btn = failed
+    ? '<button type="button" data-up-act="retry" data-up-id="' + esc(up.id) + '" aria-label="Coba lagi" class="relative z-10 text-xl leading-none">↻</button>'
+    : '<button type="button" data-up-act="cancel" data-up-id="' + esc(up.id) + '" aria-label="Batalkan" class="relative z-10 text-lg leading-none">✕</button>';
+  const del = failed ? '<button type="button" data-up-act="cancel" data-up-id="' + esc(up.id) + '" aria-label="Hapus" class="w-8 h-8 rounded-full bg-black/55 text-white text-sm shrink-0">✕</button>' : '';
+  return '<div class="flex items-center gap-2 shrink-0"><div class="relative w-12 h-12 rounded-full bg-black/55 text-white flex items-center justify-center"><div class="absolute inset-0' + (indet ? ' animate-spin' : '') + '">' + svg + '</div>' + btn + '</div>' + del + '</div>';
+}
+function uploadBubble(m) {
+  const up = m.up, name = esc(m.file_name), kind = m.file_type;
+  const chip = '<span data-up-txt class="absolute left-1.5 bottom-1.5 bg-black/55 text-white text-[11px] rounded-full px-2 py-0.5">' + upLabel(up) + '</span>';
+  let media;
+  if (kind === 'image' && up.it.thumb) media = '<div class="relative rounded-lg overflow-hidden mb-1 w-fit max-w-full"><img src="' + up.it.thumb + '" alt="" class="max-h-64 max-w-full object-cover brightness-75"><div class="absolute inset-0 flex items-center justify-center">' + ringHtml(up) + '</div>' + chip + '</div>';
+  else if (kind === 'video') media = '<div class="relative rounded-lg overflow-hidden mb-1 bg-gray-800 w-[240px] max-w-full h-36 flex items-center justify-center"><span class="absolute top-2 left-2 right-2 text-xs text-white truncate">🎥 ' + name + '</span>' + ringHtml(up) + chip + '</div>';
+  else media = '<div class="flex items-center gap-3 bg-black/10 rounded-lg p-3 mb-1 min-w-[230px]">' + ringHtml(up) + '<div class="min-w-0 flex-1"><div class="truncate text-sm font-medium">' + (kind === 'image' ? '🖼️ ' : '📄 ') + name + '</div><div data-up-txt class="text-xs text-gray-500">' + upLabel(up, true) + '</div><div class="h-1 bg-black/10 rounded-full mt-1.5 overflow-hidden"><div data-up-bar class="h-full bg-wa-light" style="width:' + Math.round(upFrac(up) * 100) + '%"></div></div></div></div>';
+  const text = m.text ? '<div class="whitespace-pre-wrap break-words msg-text leading-snug">' + esc(m.text) + '</div>' : '';
+  return '<div class="flex flex-col max-w-[85%] md:max-w-[65%] min-w-[84px] px-2.5 py-1.5 shadow-sm text-wa-ink rounded-2xl bg-wa-bubble rounded-tr-none">' +
+    media + text + '<div class="self-end flex items-center gap-1 text-[11px] text-gray-500 mt-0.5">' + timeStr(m.timestamp) + '<span>🕓</span></div></div>';
+}
+function paintUpload(up) {
+  const el = $('msgs').querySelector('[data-id="' + up.id + '"]');
+  if (!el) return;
+  const sig = upSig(up);
+  if (el.dataset.ust !== sig) { el.innerHTML = bubble(up.msg); el.dataset.ust = sig; return; }
+  const arc = el.querySelector('[data-up-arc]'); if (arc) arc.setAttribute('stroke-dashoffset', (RING_C * (1 - upFrac(up))).toFixed(1));
+  const t = el.querySelector('[data-up-txt]'); if (t) t.textContent = upLabel(up, !t.classList.contains('absolute'));
+  const b = el.querySelector('[data-up-bar]'); if (b) b.style.width = Math.round(upFrac(up) * 100) + '%';
+}
+
+/* ---------- Lampiran (bisa lebih dari satu) ---------- */
+async function pickFiles(list) {
+  const arr = Array.from(list || []);
+  for (const f0 of arr) {
+    if (state.files.length >= MAX_FILES) { toast('Maksimal ' + MAX_FILES + ' file sekali kirim.', 'error'); break; }
+    const isImg = f0.type.startsWith('image/');
+    if (!f0.size) { toast(f0.name + ' kosong.', 'error'); continue; }
+    if (isImg ? f0.size > IMG_IN_MAX : f0.size > MAX_FILE) { toast(f0.name + ' terlalu besar (maks. ' + (isImg ? '30' : '100') + ' MB).', 'error'); continue; }
+    const it = { id: 'f' + Date.now() + Math.random().toString(36).slice(2, 6), file: f0, kind: kindOf(f0), thumb: '', processing: isImg };
+    state.files.push(it); renderAttach();
+    if (isImg) {
+      compressImage(f0).then((f) => {
+        if (!state.files.includes(it)) return; // sudah dihapus / dibatalkan
+        if (f.size > MAX_FILE) { state.files = state.files.filter((x) => x !== it); toast(f0.name + ' terlalu besar (maks. 100 MB).', 'error'); renderAttach(); return; }
+        it.file = f; it.processing = false; it.thumb = URL.createObjectURL(f); renderAttach();
+      });
+    }
+  }
+}
+function renderAttach() {
+  const list = state.files;
+  $('attachBar').classList.toggle('hidden', !list.length);
+  $('attachList').innerHTML = list.map((it) => {
+    let inner;
+    if (it.processing) inner = '<span class="spin"></span>';
+    else if (it.kind === 'image' && it.thumb) inner = '<img class="w-full h-full object-cover" src="' + it.thumb + '" alt="">';
+    else if (it.kind === 'video') inner = '<div class="text-center leading-tight"><div class="text-2xl">🎥</div><div class="text-[10px] text-gray-500">' + fmtSize(it.file.size) + '</div></div>';
+    else inner = '<div class="text-center leading-tight px-1"><div class="text-2xl">📄</div><div class="text-[10px] text-gray-500 truncate">' + esc((it.file.name.split('.').pop() || '').slice(0, 5).toUpperCase()) + '</div></div>';
+    return '<div class="relative w-16 h-16 shrink-0 rounded-lg bg-gray-100 overflow-hidden flex items-center justify-center" title="' + esc(it.file.name) + '">' + inner +
+      '<button type="button" data-rm="' + esc(it.id) + '" aria-label="Hapus lampiran" class="absolute top-0 right-0 w-5 h-5 bg-black/60 text-white text-[11px] rounded-bl-lg leading-none">✕</button></div>';
+  }).join('');
+  const total = list.reduce((s, it) => s + it.file.size, 0);
+  $('attachInfo').textContent = list.length ? list.length + ' file · ' + fmtSize(total) + (list.some((i) => i.processing) ? ' · memproses…' : '') : '';
+}
+function clearAttach(moved) {
+  if (!moved) state.files.forEach((it) => { if (it.thumb) URL.revokeObjectURL(it.thumb); });
+  state.files = [];
+  $('fileMedia').value = ''; $('fileDoc').value = '';
+  renderAttach();
   $('attachMenu').classList.add('hidden');
 }
 
@@ -926,9 +1153,15 @@ function bind() {
   document.addEventListener('click', (e) => { if (!e.target.closest('#attachMenu')) $('attachMenu').classList.add('hidden'); });
   $('pickMedia').onclick = () => { $('attachMenu').classList.add('hidden'); $('fileMedia').click(); };
   $('pickDoc').onclick = () => { $('attachMenu').classList.add('hidden'); $('fileDoc').click(); };
-  $('fileMedia').onchange = (e) => pickFile(e.target.files[0]);
-  $('fileDoc').onchange = (e) => pickFile(e.target.files[0]);
-  $('attachCancel').onclick = clearAttach;
+  $('fileMedia').onchange = (e) => { const fs = Array.from(e.target.files); e.target.value = ''; pickFiles(fs); };
+  $('fileDoc').onchange = (e) => { const fs = Array.from(e.target.files); e.target.value = ''; pickFiles(fs); };
+  $('attachCancel').onclick = () => clearAttach();
+  $('attachList').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-rm]'); if (!b) return;
+    const it = state.files.find((x) => x.id === b.dataset.rm);
+    if (it && it.thumb) URL.revokeObjectURL(it.thumb);
+    state.files = state.files.filter((x) => x !== it); renderAttach();
+  });
   $('btnSend').addEventListener('pointerdown', (e) => e.preventDefault());
   $('btnSend').onclick = send;
   $('msgInput').addEventListener('input', autosize);
@@ -937,6 +1170,8 @@ function bind() {
     if (e.key === 'Enter' && !e.shiftKey && desktop) { e.preventDefault(); send(); }
   });
   $('msgs').addEventListener('click', (e) => {
+    const ua = e.target.closest('[data-up-act]');
+    if (ua) { upAction(ua.dataset.upAct, ua.dataset.upId); return; }
     const act = e.target.closest('[data-act]');
     if (act) { fileAction(act).catch((x) => toast('Gagal memuat file: ' + x.message, 'error')); return; }
     const img = e.target.closest('[data-lightbox]');
